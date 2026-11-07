@@ -10,4 +10,4 @@ Documents in this folder:
 - `SPEC.md` — buildable spec (covers both Corpus Ranker and Loop Closer)
 - `TECH-STACK.md` — the decided tech stack (2026-11-07)
 
-No code repository yet — no repos.yaml entry, per precedent.
+Project record: the canonical charter, spec, and plan for this project live in the meta-harness `projects/corpus-ranker/` folder; this repository is its code home.

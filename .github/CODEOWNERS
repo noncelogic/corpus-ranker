@@ -1,0 +1,23 @@
+# CODEOWNERS — corpus-ranker
+#
+# The owner reviews everything sensitive, and — via the default rule —
+# everything else too. Branch protection requires code-owner review, so
+# these entries are enforcement, not documentation.
+# See docs/EXTERNAL-REVIEW.md.
+
+# Default: the owner owns the whole repository.
+* @jg-noncelogic
+
+# The machinery that governs contribution and CI — owner only, always.
+/.github/ @jg-noncelogic
+/docs/EXTERNAL-REVIEW.md @jg-noncelogic
+/CONTRIBUTING.md @jg-noncelogic
+/SECURITY.md @jg-noncelogic
+/VISION.md @jg-noncelogic
+/INTENDED-USE.md @jg-noncelogic
+
+# Infrastructure and deployment configuration, wherever it lands.
+/infra/ @jg-noncelogic
+/Dockerfile* @jg-noncelogic
+/docker-compose*.yml @jg-noncelogic
+/docker-compose*.yaml @jg-noncelogic

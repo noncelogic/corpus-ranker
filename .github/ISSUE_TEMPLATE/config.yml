@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability (private)
+    url: https://github.com/noncelogic/corpus-ranker/security/advisories/new
+    about: Please do NOT open a public issue for security problems. Use private vulnerability reporting, or email jg@noncelogic.com — see SECURITY.md.
+  - name: Questions and support
+    url: https://github.com/noncelogic/corpus-ranker/blob/main/README.md
+    about: Support questions are not tracked in this repository. This is an internal-first personal project; issues are for bug reports and proposals only.

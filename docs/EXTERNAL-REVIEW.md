@@ -89,18 +89,35 @@ posture.
 
 ### 4. Merge rules
 
-- **Owner merges. Nobody else.** There is no merge queue, no auto-merge, and
-  **no force-merge, ever, for anyone** — a force-merge is an incident, not a
-  shortcut.
-- **Red checks are a hard stop.** Failing or missing required checks means
-  the PR does not merge. "It fails on main too" is a separate bug to file,
-  not a waiver.
-- Every commit must carry a DCO `Signed-off-by:` line (see CONTRIBUTING.md).
-- All review conversations must be resolved before merge.
-- Sensitive paths require CODEOWNERS review: `.github/`, this policy,
-  CONTRIBUTING.md, SECURITY.md, CI/infra configuration, and anything the
-  CODEOWNERS file lists.
-- Squash-merge is the repository norm; branches are deleted on merge.
+The following criteria apply to every pull request — internal and external
+alike. A pull request that fails any applicable criterion is not merged, and
+auto-merge is not armed on it.
+
+1. **All status checks are green.** Red, failing, or missing required checks
+   are a hard stop; such a pull request is never merged.
+2. **The applicable review is satisfied.** For internal work, the conductor's
+   verify-stage verdict must be recorded. For an external contribution, the
+   owner must review it. The harness verify stage is the review for internal
+   work; GitHub approvals are not used.
+3. **Every commit carries a DCO `Signed-off-by:` line** (see
+   CONTRIBUTING.md).
+4. **No force-merge, ever, by anyone.** A force-merge is an incident, not a
+   shortcut.
+5. **Escalation and cooling-off still apply.** A pull request touching
+   authentication, secrets handling, network egress, the update mechanism, or
+   CI, runners, or deployment configuration remains subject to §5's
+   owner-review-only rule and minimum 48-hour cooling-off period.
+6. **The work is linked and, for external contributions, accepted first.**
+   An external contribution must link an issue that a maintainer accepted
+   before the pull request was opened, with that agreement recorded in the
+   issue. Internal conductor pull requests satisfy linkage through their
+   tracked task or plan item instead of a GitHub issue.
+7. **Auto-merge follows the same criteria for everyone.** Repository
+   auto-merge is enabled. It may be armed on any pull request — internal or
+   external — once criteria 1–3 and, where applicable, criteria 5–6 are met.
+
+All review conversations must be resolved before merge. Squash-merge is the
+repository norm; branches are deleted on merge.
 
 ### 5. Escalation — sensitive areas
 

@@ -1,0 +1,30 @@
+{
+  "id": "cr_score_s0001",
+  "item_id": "cr_item_p0001",
+  "policy_id": "cr_pol_paper",
+  "policy_version": 1,
+  "dimension_scores": [
+    {
+      "dimension": "Relevance",
+      "value": 5,
+      "evidence": [
+        {
+          "id": "cr_orig_a1b2c3",
+          "span": {
+            "start": 0,
+            "end": 900
+          }
+        }
+      ]
+    }
+  ],
+  "scorer": {
+    "identity": "program:paper-judge",
+    "model": "claude-opus-5-5"
+  },
+  "scored_at": "2026-11-07T13:00:00Z",
+  "source_blind": true,
+  "retracted_at": null,
+  "retracted_by": null,
+  "retraction_reason": null
+}

@@ -1,0 +1,25 @@
+{
+  "id": "cr_tomb_t0001",
+  "target_id": "cr_orig_d4e5f6",
+  "actor": "joe",
+  "tombstoned_at": "2026-11-08T10:00:00Z",
+  "preserved": [
+    {
+      "original_id": "cr_orig_d4e5f6",
+      "content_hash": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+      "source": {
+        "source_kind": "feed",
+        "source": "https://export.arxiv.org/rss/cs.AI",
+        "recorded_by": "agent:intake-arxiv",
+        "at": "2026-11-07T09:00:00Z",
+        "hash": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+      }
+    }
+  ],
+  "tombstoned_item_ids": [
+    "cr_item_p0009"
+  ],
+  "stale_view_ids": [
+    "cr_view_v0001"
+  ]
+}

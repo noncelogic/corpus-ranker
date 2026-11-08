@@ -1,0 +1,15 @@
+{
+  "id": "cr_edge_e0001",
+  "from_id": "cr_item_p0001",
+  "to_id": "cr_item_p0002",
+  "edge_type": "cites",
+  "created_by": "agent:citation-extractor",
+  "created_at": "2026-11-07T11:00:00Z",
+  "evidence": {
+    "id": "cr_orig_a1b2c3",
+    "span": {
+      "start": 10240,
+      "end": 10388
+    }
+  }
+}

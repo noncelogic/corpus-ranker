@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://noncelogic.github.io/corpus-ranker/schemas/v1/classification.schema.json",
+  "title": "Classification (SPEC A2.4)",
+  "description": "A label assignment on an Item: proposed, then committed. Reclassification creates a new record.",
+  "type": "object",
+  "required": ["id", "item_id", "taxonomy_version", "labels", "status", "proposed_by", "committed_by", "committed_at", "confidence", "rationale"],
+  "additionalProperties": false,
+  "properties": {
+    "id": { "$ref": "common.schema.json#/$defs/classification_id" },
+    "item_id": { "$ref": "common.schema.json#/$defs/item_id" },
+    "taxonomy_version": { "type": "integer", "minimum": 1 },
+    "labels": {
+      "type": "array", "minItems": 1, "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]*(/[a-z0-9][a-z0-9_-]*)*$" }
+    },
+    "status": { "type": "string", "enum": ["pending", "committed"] },
+    "proposed_by": { "$ref": "common.schema.json#/$defs/agent_identity" },
+    "committed_by": { "anyOf": [{ "$ref": "common.schema.json#/$defs/agent_identity" }, { "type": "null" }] },
+    "committed_at": { "$ref": "common.schema.json#/$defs/nullable_timestamp" },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+    "rationale": { "type": "string" }
+  },
+  "oneOf": [
+    { "properties": { "status": { "const": "pending" }, "committed_by": { "type": "null" }, "committed_at": { "type": "null" } } },
+    { "properties": { "status": { "const": "committed" }, "committed_by": { "type": "string" }, "committed_at": { "type": "string" } } }
+  ]
+}

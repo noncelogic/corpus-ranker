@@ -1,0 +1,15 @@
+{
+  "item_id": "cr_item_p0001",
+  "chunk_id": null,
+  "embedding_model_id": "text-embedder",
+  "model_version": "2026-10",
+  "dims": 4,
+  "vector": [
+    0.12,
+    -0.03,
+    0.88,
+    0.41
+  ],
+  "built_at": "2026-11-07T09:10:00Z",
+  "source_hash": "2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae"
+}

@@ -1,0 +1,14 @@
+{
+  "id": "cr_cls_c0001",
+  "item_id": "cr_item_p0001",
+  "taxonomy_version": 1,
+  "labels": [
+    "research/context-management"
+  ],
+  "status": "committed",
+  "proposed_by": "agent:classifier",
+  "committed_by": "joe",
+  "committed_at": "2026-11-07T10:00:00Z",
+  "confidence": 0.82,
+  "rationale": "Abstract centres on agent memory and context windows."
+}

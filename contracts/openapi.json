@@ -1,0 +1,1816 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Corpus Ranker API",
+    "version": "1.0.0",
+    "description": "REST binding of the SPEC A3 operations (TECH-STACK §1). operationId is the SPEC A3 operation name; the MCP adapter maps tools 1:1 onto these. Domain objects are the versioned SPEC A2 JSON Schemas under schemas/v1/. Every write carries the acting agent identity; per-agent, per-operation scopes are enforced by the service."
+  },
+  "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
+  "servers": [
+    {
+      "url": "/"
+    }
+  ],
+  "paths": {
+    "/v1/corpora/{corpus_id}/originals": {
+      "post": {
+        "operationId": "capture",
+        "summary": "Capture raw material as an Original (dedup by content hash). Never scores or classifies inline.",
+        "parameters": [
+          {
+            "name": "corpus_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "schemas/v1/common.schema.json#/$defs/corpus_id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CaptureRequest"
+              },
+              "examples": {
+                "default": {
+                  "value": {
+                    "source_url": "https://arxiv.org/pdf/2611.01234",
+                    "source": {
+                      "source_kind": "feed",
+                      "source": "https://export.arxiv.org/rss/cs.AI"
+                    },
+                    "captured_by": "agent:intake-arxiv"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Identical bytes already captured; the existing Original is returned.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "schemas/v1/original.schema.json"
+                },
+                "examples": {
+                  "existing": {
+                    "externalValue": "examples/v1/original/valid/pdf.json"
+                  }
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "New Original captured.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "schemas/v1/original.schema.json"
+                },
+                "examples": {
+                  "pdf": {
+                    "externalValue": "examples/v1/original/valid/pdf.json"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/400"
+          },
+          "403": {
+            "$ref": "#/components/responses/403"
+          },
+          "404": {
+            "$ref": "#/components/responses/404"
+          }
+        }
+      }
+    },
+    "/v1/classifications": {
+      "post": {
+        "operationId": "classify_propose",
+        "summary": "Propose a Classification for an Item (or the Item resting on an Original).",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ClassifyProposeRequest"
+              },
+              "examples": {
+                "default": {
+                  "value": {
+                    "item_id": "cr_item_p0001",
+                    "taxonomy_version": 1,
+                    "labels": [
+                      "research/context-management"
+                    ],
+                    "rationale": "Abstract centres on agent memory and context windows.",
+                    "confidence": 0.82,
+                    "proposed_by": "agent:classifier"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Pending Classification.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "schemas/v1/classification.schema.json"
+                },
+                "examples": {
+                  "pending": {
+                    "externalValue": "examples/v1/classification/valid/pending.json"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/400"
+          },
+          "403": {
+            "$ref": "#/components/responses/403"
+          },
+          "404": {
+            "$ref": "#/components/responses/404"
+          }
+        }
+      }
+    },
+    "/v1/classifications/{classification_id}/commit": {
+      "post": {
+        "operationId": "classify_commit",
+        "summary": "Commit a pending Classification; may set Item canonical fields and create a reversible same_as merge.",
+        "parameters": [
+          {
+            "name": "classification_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "schemas/v1/common.schema.json#/$defs/classification_id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ClassifyCommitRequest"
+              },
+              "examples": {
+                "default": {
+                  "value": {
+                    "committed_by": "joe"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Committed Classification.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "schemas/v1/classification.schema.json"
+                },
+                "examples": {
+                  "committed": {
+                    "externalValue": "examples/v1/classification/valid/committed.json"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/400"
+          },
+          "403": {
+            "$ref": "#/components/responses/403"
+          },
+          "404": {
+            "$ref": "#/components/responses/404"
+          },
+          "409": {
+            "$ref": "#/components/responses/409"
+          }
+        }
+      }
+    },
+    "/v1/scores": {
+      "post": {
+        "operationId": "score",
+        "summary": "Record a Score event under a cited Policy version.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ScoreRequest"
+              },
+              "examples": {
+                "default": {
+                  "value": {
+                    "item_id": "cr_item_p0001",
+                    "policy_id": "cr_pol_paper",
+                    "policy_version": 1,
+                    "dimension_scores": [
+                      {
+                        "dimension": "Relevance",
+                        "value": 5,
+                        "reason": "Directly addresses agent context management.",
+                        "evidence": [
+                          {
+                            "id": "cr_orig_a1b2c3",
+                            "span": {
+                              "start": 0,
+                              "end": 900
+                            }
+                          }
+                        ]
+                      },
+                      {
+                        "dimension": "Technical Merit",
+                        "value": 4,
+                        "reason": "Careful ablations; code released.",
+                        "evidence": []
+                      }
+                    ],
+                    "scorer": {
+                      "identity": "program:paper-judge",
+                      "model": "claude-opus-5-5"
+                    },
+                    "source_blind": true
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Score event recorded.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScoreResponse"
+                },
+                "examples": {
+                  "default": {
+                    "value": {
+                      "score_event_id": "cr_score_s0001"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/400"
+          },
+          "403": {
+            "$ref": "#/components/responses/403"
+          },
+          "404": {
+            "$ref": "#/components/responses/404"
+          },
+          "409": {
+            "description": "The cited policy version is not the current citable version.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Error"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/scores/{score_event_id}/retract": {
+      "post": {
+        "operationId": "retract_score",
+        "summary": "Retract a Score event; it stays in history and dependent views are marked stale.",
+        "parameters": [
+          {
+            "name": "score_event_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "schemas/v1/common.schema.json#/$defs/score_event_id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RetractScoreRequest"
+              },
+              "examples": {
+                "default": {
+                  "value": {
+                    "reason": "Judge read the wrong PDF.",
+                    "actor": "joe"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The retracted Score event.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "schemas/v1/score-event.schema.json"
+                },
+                "examples": {
+                  "retracted": {
+                    "externalValue": "examples/v1/score-event/valid/retracted.json"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/400"
+          },
+          "403": {
+            "$ref": "#/components/responses/403"
+          },
+          "404": {
+            "$ref": "#/components/responses/404"
+          },
+          "409": {
+            "$ref": "#/components/responses/409"
+          }
+        }
+      }
+    },
+    "/v1/corpora/{corpus_id}/views": {
+      "post": {
+        "operationId": "rank",
+        "summary": "Compute a new Ranked View under a Policy version.",
+        "parameters": [
+          {
+            "name": "corpus_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "schemas/v1/common.schema.json#/$defs/corpus_id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RankRequest"
+              },
+              "examples": {
+                "default": {
+                  "value": {
+                    "name": "daily-top-papers",
+                    "policy_id": "cr_pol_paper",
+                    "policy_version": 1,
+                    "query": {
+                      "subject": "agent context management",
+                      "filters": {
+                        "labels": [
+                          "research/context-management"
+                        ],
+                        "score_ranges": {
+                          "Relevance": {
+                            "min": 3
+                          }
+                        }
+                      }
+                    },
+                    "n": 10,
+                    "requested_by": "agent:daily-digest"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "New Ranked View.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "schemas/v1/ranked-view.schema.json"
+                },
+                "examples": {
+                  "current": {
+                    "externalValue": "examples/v1/ranked-view/valid/current.json"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/400"
+          },
+          "403": {
+            "$ref": "#/components/responses/403"
+          },
+          "404": {
+            "$ref": "#/components/responses/404"
+          }
+        }
+      }
+    },
+    "/v1/top-n": {
+      "post": {
+        "operationId": "get_top_n",
+        "summary": "Ordered top-N entries, small enough to hand a model as pre-digested context.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GetTopNRequest"
+              },
+              "examples": {
+                "default": {
+                  "value": {
+                    "view_id": "cr_view_v0001"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Ordered entries.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TopN"
+                },
+                "examples": {
+                  "default": {
+                    "value": {
+                      "view_id": "cr_view_v0001",
+                      "policy_id": "cr_pol_paper",
+                      "policy_version": 1,
+                      "stale": false,
+                      "stale_reason": null,
+                      "entries": [
+                        {
+                          "item_id": "cr_item_p0001",
+                          "rank": 1,
+                          "title": "Context Management for Long-Horizon Agents",
+                          "summary": "Proposes a hierarchical memory for agent context.",
+                          "composite": 9,
+                          "dimension_values": {
+                            "Relevance": 5,
+                            "Technical Merit": 4
+                          }
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/400"
+          },
+          "403": {
+            "$ref": "#/components/responses/403"
+          },
+          "404": {
+            "$ref": "#/components/responses/404"
+          }
+        }
+      }
+    },
+    "/v1/items/{item_id}/explain": {
+      "get": {
+        "operationId": "explain_score",
+        "summary": "Every contributing Score event for an Item under a Policy, plus retraction/supersession state.",
+        "parameters": [
+          {
+            "name": "item_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "schemas/v1/common.schema.json#/$defs/item_id"
+            }
+          },
+          {
+            "name": "policy_id",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "schemas/v1/common.schema.json#/$defs/policy_id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Explanation chain.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Explanation"
+                },
+                "examples": {
+                  "default": {
+                    "value": {
+                      "item_id": "cr_item_p0001",
+                      "item_status": "active",
+                      "policy_id": "cr_pol_paper",
+                      "score_events": [
+                        {
+                          "id": "cr_score_s0001",
+                          "item_id": "cr_item_p0001",
+                          "policy_id": "cr_pol_paper",
+                          "policy_version": 1,
+                          "dimension_scores": [
+                            {
+                              "dimension": "Relevance",
+                              "value": 5,
+                              "reason": "Directly addresses agent context management.",
+                              "evidence": [
+                                {
+                                  "id": "cr_orig_a1b2c3",
+                                  "span": {
+                                    "start": 0,
+                                    "end": 900
+                                  }
+                                }
+                              ]
+                            },
+                            {
+                              "dimension": "Technical Merit",
+                              "value": 4,
+                              "reason": "Careful ablations; code released.",
+                              "evidence": []
+                            }
+                          ],
+                          "scorer": {
+                            "identity": "program:paper-judge",
+                            "model": "claude-opus-5-5"
+                          },
+                          "scored_at": "2026-11-07T13:00:00Z",
+                          "source_blind": true,
+                          "retracted_at": null,
+                          "retracted_by": null,
+                          "retraction_reason": null
+                        }
+                      ],
+                      "evidence_state": [
+                        {
+                          "id": "cr_orig_a1b2c3",
+                          "state": "live"
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "$ref": "#/components/responses/403"
+          },
+          "404": {
+            "$ref": "#/components/responses/404"
+          }
+        }
+      }
+    },
+    "/v1/policies/{policy_id}/replay": {
+      "post": {
+        "operationId": "replay",
+        "summary": "Re-score or re-derive composites under a new Policy version without touching old Score events; produces new views and a diff.",
+        "parameters": [
+          {
+            "name": "policy_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "schemas/v1/common.schema.json#/$defs/policy_id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReplayRequest"
+              },
+              "examples": {
+                "default": {
+                  "value": {
+                    "from_version": 1,
+                    "to_version": 2,
+                    "corpus_id": "cr_corpus_papers01",
+                    "mode": "recompose",
+                    "requested_by": "joe"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Replay result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReplayResult"
+                },
+                "examples": {
+                  "default": {
+                    "value": {
+                      "policy_id": "cr_pol_paper",
+                      "from_version": 1,
+                      "to_version": 2,
+                      "view_ids": [
+                        "cr_view_v0003"
+                      ],
+                      "diff": [
+                        {
+                          "item_id": "cr_item_p0001",
+                          "from_rank": 1,
+                          "to_rank": 2,
+                          "composite_delta": -0.5
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/400"
+          },
+          "403": {
+            "$ref": "#/components/responses/403"
+          },
+          "404": {
+            "$ref": "#/components/responses/404"
+          }
+        }
+      }
+    },
+    "/v1/corpora/{corpus_id}/search": {
+      "post": {
+        "operationId": "search",
+        "summary": "Vector + filter retrieval over Items. Unscored items are included and marked; retrieval is not ranking.",
+        "parameters": [
+          {
+            "name": "corpus_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "schemas/v1/common.schema.json#/$defs/corpus_id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SearchRequest"
+              },
+              "examples": {
+                "default": {
+                  "value": {
+                    "subject": "agent context management",
+                    "filters": {
+                      "labels": [
+                        "research/context-management"
+                      ]
+                    },
+                    "limit": 20
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Results ordered by similarity.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchResults"
+                },
+                "examples": {
+                  "default": {
+                    "value": {
+                      "results": [
+                        {
+                          "item": {
+                            "id": "cr_item_p0001",
+                            "corpus_id": "cr_corpus_papers01",
+                            "item_type": "paper",
+                            "title": "Context Management for Long-Horizon Agents",
+                            "summary": "Proposes a hierarchical memory for agent context.",
+                            "canonical_fields": {
+                              "authors": [
+                                "A. Author",
+                                "B. Author"
+                              ],
+                              "venue": "arXiv",
+                              "arxiv_id": "2611.01234"
+                            },
+                            "original_ids": [
+                              "cr_orig_a1b2c3"
+                            ],
+                            "identity_keys": {
+                              "arxiv_id": "2611.01234",
+                              "url": "https://arxiv.org/abs/2611.01234"
+                            },
+                            "status": "active",
+                            "created_at": "2026-11-07T09:05:00Z",
+                            "updated_at": "2026-11-07T09:05:00Z"
+                          },
+                          "similarity": 0.91,
+                          "scored": true
+                        }
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/400"
+          },
+          "403": {
+            "$ref": "#/components/responses/403"
+          },
+          "404": {
+            "$ref": "#/components/responses/404"
+          }
+        }
+      }
+    },
+    "/v1/items/{item_id}/supersede": {
+      "post": {
+        "operationId": "supersede_item",
+        "summary": "Mark an Item superseded; edges are written and dependent views go stale.",
+        "parameters": [
+          {
+            "name": "item_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "schemas/v1/common.schema.json#/$defs/item_id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SupersedeItemRequest"
+              },
+              "examples": {
+                "default": {
+                  "value": {
+                    "type": "fact_replacement",
+                    "new_item_id": "cr_item_p0002",
+                    "actor": "joe"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Superseded Item, written edges and stale views.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SupersedeResult"
+                },
+                "examples": {
+                  "default": {
+                    "value": {
+                      "item": {
+                        "id": "cr_item_p0001",
+                        "corpus_id": "cr_corpus_papers01",
+                        "item_type": "paper",
+                        "title": "Context Management for Long-Horizon Agents",
+                        "summary": "Proposes a hierarchical memory for agent context.",
+                        "canonical_fields": {
+                          "authors": [
+                            "A. Author",
+                            "B. Author"
+                          ],
+                          "venue": "arXiv",
+                          "arxiv_id": "2611.01234"
+                        },
+                        "original_ids": [
+                          "cr_orig_a1b2c3"
+                        ],
+                        "identity_keys": {
+                          "arxiv_id": "2611.01234",
+                          "url": "https://arxiv.org/abs/2611.01234"
+                        },
+                        "status": "superseded",
+                        "created_at": "2026-11-07T09:05:00Z",
+                        "updated_at": "2026-11-07T09:05:00Z"
+                      },
+                      "edges": [
+                        {
+                          "id": "cr_edge_e0009",
+                          "from_id": "cr_item_p0002",
+                          "to_id": "cr_item_p0001",
+                          "edge_type": "supersedes",
+                          "created_by": "joe",
+                          "created_at": "2026-11-08T12:00:00Z",
+                          "evidence": null
+                        }
+                      ],
+                      "stale_view_ids": [
+                        "cr_view_v0001"
+                      ]
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/400"
+          },
+          "403": {
+            "$ref": "#/components/responses/403"
+          },
+          "404": {
+            "$ref": "#/components/responses/404"
+          },
+          "409": {
+            "$ref": "#/components/responses/409"
+          }
+        }
+      }
+    },
+    "/v1/tombstones": {
+      "post": {
+        "operationId": "tombstone",
+        "summary": "Verified forgetting (SPEC A2.9).",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TombstoneRequest"
+              },
+              "examples": {
+                "default": {
+                  "value": {
+                    "target_id": "cr_orig_d4e5f6",
+                    "reason": "verified forgetting requested by joe",
+                    "actor": "joe"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Tombstone record.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "schemas/v1/tombstone.schema.json"
+                },
+                "examples": {
+                  "original": {
+                    "externalValue": "examples/v1/tombstone/valid/original.json"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/400"
+          },
+          "403": {
+            "$ref": "#/components/responses/403"
+          },
+          "404": {
+            "$ref": "#/components/responses/404"
+          }
+        }
+      }
+    },
+    "/v1/exports": {
+      "post": {
+        "operationId": "export",
+        "summary": "Produce the full portable bundle (SPEC A5).",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ExportRequest"
+              },
+              "examples": {
+                "default": {
+                  "value": {
+                    "corpus_id": "cr_corpus_papers01",
+                    "format": "directory",
+                    "include_embeddings": false,
+                    "requested_by": "joe"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Bundle written.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ExportResult"
+                },
+                "examples": {
+                  "default": {
+                    "value": {
+                      "bundle_uri": "s3://ranker-exports/2026-11-08T12-00-00Z/",
+                      "manifest": {
+                        "bundle_version": "v1",
+                        "exported_at": "2026-11-08T12:00:00Z",
+                        "counts": {
+                          "originals": 1,
+                          "items": 1,
+                          "classifications": 1,
+                          "edges": 1,
+                          "scores": 1,
+                          "policies": 1,
+                          "views": 1
+                        },
+                        "hashes": {
+                          "items.jsonl": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/400"
+          },
+          "403": {
+            "$ref": "#/components/responses/403"
+          },
+          "404": {
+            "$ref": "#/components/responses/404"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "responses": {
+      "400": {
+        "description": "Malformed request.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "403": {
+        "description": "The acting agent lacks the scope for this operation.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "404": {
+        "description": "Referenced object not found.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "409": {
+        "description": "Conflicts with the object's current state.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      }
+    },
+    "schemas": {
+      "Error": {
+        "type": "object",
+        "required": [
+          "error",
+          "message"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "error": {
+            "type": "string",
+            "minLength": 1
+          },
+          "message": {
+            "type": "string"
+          }
+        }
+      },
+      "Corpus": {
+        "$ref": "schemas/v1/corpus.schema.json"
+      },
+      "Original": {
+        "$ref": "schemas/v1/original.schema.json"
+      },
+      "Item": {
+        "$ref": "schemas/v1/item.schema.json"
+      },
+      "Classification": {
+        "$ref": "schemas/v1/classification.schema.json"
+      },
+      "Edge": {
+        "$ref": "schemas/v1/edge.schema.json"
+      },
+      "Policy": {
+        "$ref": "schemas/v1/policy.schema.json"
+      },
+      "ScoreEvent": {
+        "$ref": "schemas/v1/score-event.schema.json"
+      },
+      "RankedView": {
+        "$ref": "schemas/v1/ranked-view.schema.json"
+      },
+      "Tombstone": {
+        "$ref": "schemas/v1/tombstone.schema.json"
+      },
+      "EmbeddingRecord": {
+        "$ref": "schemas/v1/embedding-record.schema.json"
+      },
+      "CaptureRequest": {
+        "type": "object",
+        "required": [
+          "source",
+          "captured_by"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "content_base64": {
+            "type": "string",
+            "minLength": 1,
+            "description": "The raw bytes, base64-encoded."
+          },
+          "media_type": {
+            "type": "string",
+            "pattern": "^[a-z]+/[a-zA-Z0-9.+_-]+$"
+          },
+          "source_url": {
+            "type": "string",
+            "format": "uri"
+          },
+          "source": {
+            "type": "object",
+            "required": [
+              "source_kind",
+              "source"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "source_kind": {
+                "type": "string",
+                "enum": [
+                  "url",
+                  "feed",
+                  "inbox",
+                  "upload",
+                  "api"
+                ]
+              },
+              "source": {
+                "$ref": "schemas/v1/common.schema.json#/$defs/non_empty_string"
+              }
+            }
+          },
+          "captured_by": {
+            "$ref": "schemas/v1/common.schema.json#/$defs/agent_identity"
+          },
+          "raw_metadata": {
+            "type": "object"
+          }
+        },
+        "oneOf": [
+          {
+            "required": [
+              "content_base64",
+              "media_type"
+            ]
+          },
+          {
+            "required": [
+              "source_url"
+            ]
+          }
+        ]
+      },
+      "ClassifyProposeRequest": {
+        "type": "object",
+        "required": [
+          "taxonomy_version",
+          "labels",
+          "rationale",
+          "confidence",
+          "proposed_by"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "item_id": {
+            "$ref": "schemas/v1/common.schema.json#/$defs/item_id"
+          },
+          "original_id": {
+            "$ref": "schemas/v1/common.schema.json#/$defs/original_id"
+          },
+          "taxonomy_version": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "labels": {
+            "$ref": "schemas/v1/classification.schema.json#/properties/labels"
+          },
+          "rationale": {
+            "type": "string"
+          },
+          "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1
+          },
+          "proposed_by": {
+            "$ref": "schemas/v1/common.schema.json#/$defs/agent_identity"
+          }
+        },
+        "oneOf": [
+          {
+            "required": [
+              "item_id"
+            ]
+          },
+          {
+            "required": [
+              "original_id"
+            ]
+          }
+        ]
+      },
+      "ClassifyCommitRequest": {
+        "type": "object",
+        "required": [
+          "committed_by"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "committed_by": {
+            "$ref": "schemas/v1/common.schema.json#/$defs/agent_identity"
+          },
+          "canonical_fields": {
+            "type": "object",
+            "description": "Canonical fields to set on the Item."
+          },
+          "same_as_item_id": {
+            "$ref": "schemas/v1/common.schema.json#/$defs/item_id",
+            "description": "Record a reversible same_as merge with this Item."
+          }
+        }
+      },
+      "ScoreRequest": {
+        "type": "object",
+        "required": [
+          "item_id",
+          "policy_id",
+          "policy_version",
+          "dimension_scores",
+          "scorer",
+          "source_blind"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "item_id": {
+            "$ref": "schemas/v1/common.schema.json#/$defs/item_id"
+          },
+          "policy_id": {
+            "$ref": "schemas/v1/common.schema.json#/$defs/policy_id"
+          },
+          "policy_version": {
+            "$ref": "schemas/v1/common.schema.json#/$defs/policy_version"
+          },
+          "dimension_scores": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "$ref": "schemas/v1/score-event.schema.json#/$defs/dimension_score"
+            }
+          },
+          "scorer": {
+            "$ref": "schemas/v1/score-event.schema.json#/$defs/scorer"
+          },
+          "source_blind": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ScoreResponse": {
+        "type": "object",
+        "required": [
+          "score_event_id"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "score_event_id": {
+            "$ref": "schemas/v1/common.schema.json#/$defs/score_event_id"
+          }
+        }
+      },
+      "RetractScoreRequest": {
+        "type": "object",
+        "required": [
+          "reason",
+          "actor"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "$ref": "schemas/v1/common.schema.json#/$defs/non_empty_string"
+          },
+          "actor": {
+            "$ref": "schemas/v1/common.schema.json#/$defs/agent_identity"
+          }
+        }
+      },
+      "RankRequest": {
+        "type": "object",
+        "required": [
+          "policy_id",
+          "query",
+          "n",
+          "requested_by"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1
+          },
+          "policy_id": {
+            "$ref": "schemas/v1/common.schema.json#/$defs/policy_id"
+          },
+          "policy_version": {
+            "$ref": "schemas/v1/common.schema.json#/$defs/policy_version",
+            "description": "Defaults to the current version."
+          },
+          "query": {
+            "$ref": "schemas/v1/ranked-view.schema.json#/$defs/query"
+          },
+          "n": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "requested_by": {
+            "$ref": "schemas/v1/common.schema.json#/$defs/agent_identity"
+          }
+        }
+      },
+      "GetTopNRequest": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "view_id"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "view_id": {
+                "$ref": "schemas/v1/common.schema.json#/$defs/view_id"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "corpus_id",
+              "policy_name",
+              "query",
+              "n"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "corpus_id": {
+                "$ref": "schemas/v1/common.schema.json#/$defs/corpus_id"
+              },
+              "policy_name": {
+                "$ref": "schemas/v1/policy.schema.json#/properties/name"
+              },
+              "query": {
+                "$ref": "schemas/v1/ranked-view.schema.json#/$defs/query"
+              },
+              "n": {
+                "type": "integer",
+                "minimum": 1
+              }
+            }
+          }
+        ]
+      },
+      "TopN": {
+        "type": "object",
+        "required": [
+          "view_id",
+          "policy_id",
+          "policy_version",
+          "stale",
+          "stale_reason",
+          "entries"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "view_id": {
+            "$ref": "schemas/v1/common.schema.json#/$defs/view_id"
+          },
+          "policy_id": {
+            "$ref": "schemas/v1/common.schema.json#/$defs/policy_id"
+          },
+          "policy_version": {
+            "$ref": "schemas/v1/common.schema.json#/$defs/policy_version"
+          },
+          "stale": {
+            "type": "boolean"
+          },
+          "stale_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "entries": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "item_id",
+                "rank",
+                "title",
+                "summary",
+                "composite",
+                "dimension_values"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "item_id": {
+                  "$ref": "schemas/v1/common.schema.json#/$defs/item_id"
+                },
+                "rank": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "title": {
+                  "type": "string"
+                },
+                "summary": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "composite": {
+                  "type": "number"
+                },
+                "dimension_values": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "number"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "Explanation": {
+        "type": "object",
+        "required": [
+          "item_id",
+          "item_status",
+          "policy_id",
+          "score_events",
+          "evidence_state"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "item_id": {
+            "$ref": "schemas/v1/common.schema.json#/$defs/item_id"
+          },
+          "item_status": {
+            "$ref": "schemas/v1/item.schema.json#/properties/status"
+          },
+          "policy_id": {
+            "$ref": "schemas/v1/common.schema.json#/$defs/policy_id"
+          },
+          "score_events": {
+            "type": "array",
+            "items": {
+              "$ref": "schemas/v1/score-event.schema.json"
+            }
+          },
+          "evidence_state": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "state"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "$ref": "schemas/v1/common.schema.json#/$defs/ranker_id"
+                },
+                "state": {
+                  "type": "string",
+                  "enum": [
+                    "live",
+                    "merged",
+                    "superseded",
+                    "tombstoned",
+                    "retracted"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "ReplayRequest": {
+        "type": "object",
+        "required": [
+          "from_version",
+          "to_version",
+          "corpus_id",
+          "mode",
+          "requested_by"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "from_version": {
+            "$ref": "schemas/v1/common.schema.json#/$defs/policy_version"
+          },
+          "to_version": {
+            "$ref": "schemas/v1/common.schema.json#/$defs/policy_version"
+          },
+          "corpus_id": {
+            "$ref": "schemas/v1/common.schema.json#/$defs/corpus_id"
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "rescore",
+              "recompose"
+            ],
+            "description": "rescore: new Score events under to_version; recompose: re-derive composites from existing scores."
+          },
+          "requested_by": {
+            "$ref": "schemas/v1/common.schema.json#/$defs/agent_identity"
+          }
+        }
+      },
+      "ReplayResult": {
+        "type": "object",
+        "required": [
+          "policy_id",
+          "from_version",
+          "to_version",
+          "view_ids",
+          "diff"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "policy_id": {
+            "$ref": "schemas/v1/common.schema.json#/$defs/policy_id"
+          },
+          "from_version": {
+            "$ref": "schemas/v1/common.schema.json#/$defs/policy_version"
+          },
+          "to_version": {
+            "$ref": "schemas/v1/common.schema.json#/$defs/policy_version"
+          },
+          "view_ids": {
+            "type": "array",
+            "items": {
+              "$ref": "schemas/v1/common.schema.json#/$defs/view_id"
+            }
+          },
+          "diff": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "item_id",
+                "from_rank",
+                "to_rank",
+                "composite_delta"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "item_id": {
+                  "$ref": "schemas/v1/common.schema.json#/$defs/item_id"
+                },
+                "from_rank": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 1
+                },
+                "to_rank": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 1
+                },
+                "composite_delta": {
+                  "type": [
+                    "number",
+                    "null"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "SearchRequest": {
+        "type": "object",
+        "required": [
+          "subject"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "subject": {
+            "$ref": "schemas/v1/common.schema.json#/$defs/non_empty_string"
+          },
+          "filters": {
+            "$ref": "schemas/v1/ranked-view.schema.json#/$defs/filters"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000
+          }
+        }
+      },
+      "SearchResults": {
+        "type": "object",
+        "required": [
+          "results"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "results": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "item",
+                "similarity",
+                "scored"
+              ],
+              "additionalProperties": false,
+              "properties": {
+                "item": {
+                  "$ref": "schemas/v1/item.schema.json"
+                },
+                "similarity": {
+                  "type": "number"
+                },
+                "scored": {
+                  "type": "boolean",
+                  "description": "False for items with no live Score event; retrieval is not ranking."
+                }
+              }
+            }
+          }
+        }
+      },
+      "SupersedeItemRequest": {
+        "type": "object",
+        "required": [
+          "type",
+          "actor"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": [
+              "fact_replacement",
+              "same_as_merge"
+            ],
+            "description": "Shared supersession vocabulary (SPEC §4); Ranker semantics: views go stale, re-derive offline."
+          },
+          "new_item_id": {
+            "$ref": "schemas/v1/common.schema.json#/$defs/item_id"
+          },
+          "reason": {
+            "$ref": "schemas/v1/common.schema.json#/$defs/non_empty_string"
+          },
+          "actor": {
+            "$ref": "schemas/v1/common.schema.json#/$defs/agent_identity"
+          }
+        },
+        "anyOf": [
+          {
+            "required": [
+              "new_item_id"
+            ]
+          },
+          {
+            "required": [
+              "reason"
+            ]
+          }
+        ]
+      },
+      "SupersedeResult": {
+        "type": "object",
+        "required": [
+          "item",
+          "edges",
+          "stale_view_ids"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "item": {
+            "$ref": "schemas/v1/item.schema.json"
+          },
+          "edges": {
+            "type": "array",
+            "items": {
+              "$ref": "schemas/v1/edge.schema.json"
+            }
+          },
+          "stale_view_ids": {
+            "type": "array",
+            "items": {
+              "$ref": "schemas/v1/common.schema.json#/$defs/view_id"
+            }
+          }
+        }
+      },
+      "TombstoneRequest": {
+        "type": "object",
+        "required": [
+          "target_id",
+          "reason",
+          "actor"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "target_id": {
+            "$ref": "schemas/v1/tombstone.schema.json#/properties/target_id"
+          },
+          "reason": {
+            "$ref": "schemas/v1/common.schema.json#/$defs/non_empty_string"
+          },
+          "actor": {
+            "$ref": "schemas/v1/common.schema.json#/$defs/agent_identity"
+          }
+        }
+      },
+      "ExportRequest": {
+        "type": "object",
+        "required": [
+          "format",
+          "requested_by"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "corpus_id": {
+            "anyOf": [
+              {
+                "$ref": "schemas/v1/common.schema.json#/$defs/corpus_id"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Omit or null to export all corpora."
+          },
+          "format": {
+            "type": "string",
+            "enum": [
+              "directory",
+              "tar.gz"
+            ]
+          },
+          "include_embeddings": {
+            "type": "boolean"
+          },
+          "requested_by": {
+            "$ref": "schemas/v1/common.schema.json#/$defs/agent_identity"
+          }
+        }
+      },
+      "ExportResult": {
+        "type": "object",
+        "required": [
+          "bundle_uri",
+          "manifest"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "bundle_uri": {
+            "type": "string",
+            "format": "uri"
+          },
+          "manifest": {
+            "type": "object",
+            "required": [
+              "bundle_version",
+              "exported_at",
+              "counts",
+              "hashes"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "bundle_version": {
+                "type": "string",
+                "minLength": 1
+              },
+              "exported_at": {
+                "$ref": "schemas/v1/common.schema.json#/$defs/timestamp"
+              },
+              "counts": {
+                "type": "object",
+                "additionalProperties": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              },
+              "hashes": {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "schemas/v1/common.schema.json#/$defs/sha256"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

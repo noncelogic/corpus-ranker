@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://noncelogic.github.io/corpus-ranker/schemas/v1/ranked-view.schema.json",
+  "title": "Ranked View (SPEC A2.8)",
+  "description": "A saved, reproducible derivation citing the exact Score events used. Never silently presented as current once stale.",
+  "type": "object",
+  "required": ["id", "name", "corpus_id", "policy_id", "policy_version", "query", "entries", "computed_at", "stale", "stale_reason", "action_events"],
+  "additionalProperties": false,
+  "properties": {
+    "id": { "$ref": "common.schema.json#/$defs/view_id" },
+    "name": { "type": "string", "minLength": 1 },
+    "corpus_id": { "$ref": "common.schema.json#/$defs/corpus_id" },
+    "policy_id": { "$ref": "common.schema.json#/$defs/policy_id" },
+    "policy_version": { "$ref": "common.schema.json#/$defs/policy_version" },
+    "query": { "$ref": "#/$defs/query" },
+    "entries": { "type": "array", "items": { "$ref": "#/$defs/entry" } },
+    "computed_at": { "$ref": "common.schema.json#/$defs/timestamp" },
+    "stale": { "type": "boolean" },
+    "stale_reason": { "type": ["string", "null"] },
+    "action_events": { "type": "array", "items": { "$ref": "#/$defs/action_event" } }
+  },
+  "oneOf": [
+    { "properties": { "stale": { "const": false }, "stale_reason": { "type": "null" } } },
+    { "properties": { "stale": { "const": true }, "stale_reason": { "type": "string", "minLength": 1 } } }
+  ],
+  "$defs": {
+    "query": {
+      "type": "object",
+      "description": "The subject-area question, filters and/or vector query that scoped the view.",
+      "minProperties": 1,
+      "additionalProperties": false,
+      "properties": {
+        "subject": { "type": "string", "minLength": 1 },
+        "filters": { "$ref": "#/$defs/filters" },
+        "vector_query": { "type": "string", "minLength": 1 }
+      }
+    },
+    "filters": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "labels": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "item_types": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "score_ranges": {
+          "type": "object",
+          "description": "Dimension name to inclusive range.",
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": { "min": { "type": "number" }, "max": { "type": "number" } }
+          }
+        },
+        "created_after": { "$ref": "common.schema.json#/$defs/timestamp" },
+        "created_before": { "$ref": "common.schema.json#/$defs/timestamp" }
+      }
+    },
+    "entry": {
+      "type": "object",
+      "required": ["item_id", "rank", "composite", "score_event_ids"],
+      "additionalProperties": false,
+      "properties": {
+        "item_id": { "$ref": "common.schema.json#/$defs/item_id" },
+        "rank": { "type": "integer", "minimum": 1 },
+        "composite": { "type": "number" },
+        "score_event_ids": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "common.schema.json#/$defs/score_event_id" } }
+      }
+    },
+    "action_event": {
+      "type": "object",
+      "required": ["item_id", "action_type", "actor", "at"],
+      "additionalProperties": false,
+      "properties": {
+        "item_id": { "$ref": "common.schema.json#/$defs/item_id" },
+        "action_type": { "type": "string", "enum": ["picked", "promoted", "pursued", "rejected"] },
+        "actor": { "$ref": "common.schema.json#/$defs/agent_identity" },
+        "at": { "$ref": "common.schema.json#/$defs/timestamp" }
+      }
+    }
+  }
+}

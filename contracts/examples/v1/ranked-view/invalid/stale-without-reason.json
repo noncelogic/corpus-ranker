@@ -1,0 +1,41 @@
+{
+  "id": "cr_view_v0001",
+  "name": "daily-top-papers",
+  "corpus_id": "cr_corpus_papers01",
+  "policy_id": "cr_pol_paper",
+  "policy_version": 1,
+  "query": {
+    "subject": "agent context management",
+    "filters": {
+      "labels": [
+        "research/context-management"
+      ],
+      "score_ranges": {
+        "Relevance": {
+          "min": 3
+        }
+      }
+    }
+  },
+  "entries": [
+    {
+      "item_id": "cr_item_p0001",
+      "rank": 1,
+      "composite": 9,
+      "score_event_ids": [
+        "cr_score_s0001"
+      ]
+    }
+  ],
+  "computed_at": "2026-11-07T14:00:00Z",
+  "stale": true,
+  "stale_reason": null,
+  "action_events": [
+    {
+      "item_id": "cr_item_p0001",
+      "action_type": "picked",
+      "actor": "joe",
+      "at": "2026-11-07T15:00:00Z"
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "version": "v1",
+  "objects": {
+    "A2.1": "corpus.schema.json",
+    "A2.2": "original.schema.json",
+    "A2.3": "item.schema.json",
+    "A2.4": "classification.schema.json",
+    "A2.5": "edge.schema.json",
+    "A2.6": "policy.schema.json",
+    "A2.7": "score-event.schema.json",
+    "A2.8": "ranked-view.schema.json",
+    "A2.9": "tombstone.schema.json",
+    "A2.10": "embedding-record.schema.json"
+  }
+}

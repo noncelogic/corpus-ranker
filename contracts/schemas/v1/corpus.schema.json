@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://noncelogic.github.io/corpus-ranker/schemas/v1/corpus.schema.json",
+  "title": "Corpus (SPEC A2.1)",
+  "description": "A named collection with one intake shape and one classification taxonomy.",
+  "type": "object",
+  "required": ["id", "name", "description", "taxonomy_id", "created_at", "status"],
+  "additionalProperties": false,
+  "properties": {
+    "id": { "$ref": "common.schema.json#/$defs/corpus_id" },
+    "name": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$", "examples": ["papers", "funding", "jobs", "photos"] },
+    "description": { "type": "string" },
+    "taxonomy_id": { "$ref": "common.schema.json#/$defs/taxonomy_id" },
+    "created_at": { "$ref": "common.schema.json#/$defs/timestamp" },
+    "status": { "type": "string", "enum": ["active", "paused", "archived"] }
+  }
+}

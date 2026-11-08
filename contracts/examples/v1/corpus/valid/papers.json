@@ -1,0 +1,8 @@
+{
+  "id": "cr_corpus_papers01",
+  "name": "papers",
+  "description": "AI research papers from the daily arXiv feed.",
+  "taxonomy_id": "cr_tax_papers01",
+  "created_at": "2026-11-07T08:00:00Z",
+  "status": "active"
+}

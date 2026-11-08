@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://noncelogic.github.io/corpus-ranker/schemas/v1/policy.schema.json",
+  "title": "Policy (SPEC A2.6)",
+  "description": "A versioned ranking rubric. Edited only by creating a new version; immutable once any Score cites it.",
+  "type": "object",
+  "required": ["id", "name", "corpus_id", "version", "dimensions", "judge_config", "composite_rule", "created_by", "created_at", "supersedes_version"],
+  "additionalProperties": false,
+  "properties": {
+    "id": { "$ref": "common.schema.json#/$defs/policy_id" },
+    "name": { "type": "string", "pattern": "^[a-z][a-z0-9-]*$" },
+    "corpus_id": { "$ref": "common.schema.json#/$defs/corpus_id" },
+    "version": { "$ref": "common.schema.json#/$defs/policy_version" },
+    "dimensions": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/dimension" } },
+    "judge_config": {
+      "type": "object",
+      "required": ["allowed_scorers", "source_blind"],
+      "additionalProperties": false,
+      "properties": {
+        "allowed_scorers": {
+          "type": "array", "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["kind", "identity"],
+            "additionalProperties": false,
+            "properties": {
+              "kind": { "type": "string", "enum": ["human", "program", "llm_judge"] },
+              "identity": { "$ref": "common.schema.json#/$defs/agent_identity" },
+              "config": { "type": "object", "description": "Model / judge configuration where applicable." }
+            }
+          }
+        },
+        "source_blind": { "type": "boolean" }
+      }
+    },
+    "composite_rule": {
+      "type": "object",
+      "description": "How dimension scores combine into ranked order: data, not code.",
+      "required": ["method", "tie_breaks"],
+      "additionalProperties": false,
+      "properties": {
+        "method": { "type": "string", "enum": ["weighted_sum", "weighted_mean"] },
+        "tie_breaks": { "type": "array", "items": { "type": "string", "minLength": 1 }, "description": "Dimension names or item fields, in priority order." }
+      }
+    },
+    "created_by": { "$ref": "common.schema.json#/$defs/agent_identity" },
+    "created_at": { "$ref": "common.schema.json#/$defs/timestamp" },
+    "supersedes_version": { "anyOf": [{ "$ref": "common.schema.json#/$defs/policy_version" }, { "type": "null" }] }
+  },
+  "$defs": {
+    "dimension": {
+      "type": "object",
+      "required": ["name", "scale", "definition", "weight", "judge_instructions"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "scale": {
+          "type": "object",
+          "required": ["kind", "min", "max"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": { "type": "string", "enum": ["integer", "number"] },
+            "min": { "type": "number" },
+            "max": { "type": "number" }
+          }
+        },
+        "definition": { "type": "object", "minProperties": 1, "additionalProperties": { "type": "string", "minLength": 1 }, "description": "What each level means, in words, keyed by level." },
+        "weight": { "type": "number", "minimum": 0 },
+        "judge_instructions": { "type": "string" }
+      }
+    }
+  }
+}

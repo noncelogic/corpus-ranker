@@ -1,0 +1,20 @@
+{
+  "id": "cr_orig_a1b2c3",
+  "corpus_id": "cr_corpus_papers01",
+  "content_hash": "abc",
+  "media_type": "application/pdf",
+  "byte_size": 482113,
+  "storage_uri": "s3://ranker-originals/9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+  "source": {
+    "source_kind": "feed",
+    "source": "https://export.arxiv.org/rss/cs.AI",
+    "recorded_by": "agent:intake-arxiv",
+    "at": "2026-11-07T09:00:00Z",
+    "hash": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+  },
+  "raw_metadata": {
+    "arxiv_id": "2611.01234"
+  },
+  "tombstoned_at": null,
+  "tombstone_reason": null
+}

@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://noncelogic.github.io/corpus-ranker/schemas/v1/item.schema.json",
+  "title": "Item (SPEC A2.3)",
+  "description": "The canonical unit a corpus is about. Every Item traces to at least one Original.",
+  "type": "object",
+  "required": ["id", "corpus_id", "item_type", "title", "summary", "canonical_fields", "original_ids", "identity_keys", "status", "created_at", "updated_at"],
+  "additionalProperties": false,
+  "properties": {
+    "id": { "$ref": "common.schema.json#/$defs/item_id" },
+    "corpus_id": { "$ref": "common.schema.json#/$defs/corpus_id" },
+    "item_type": { "type": "string", "pattern": "^[a-z][a-z0-9_-]*$", "examples": ["paper", "opportunity", "job", "experiment", "post", "document", "photo", "repo"] },
+    "title": { "type": "string", "minLength": 1 },
+    "summary": { "type": ["string", "null"], "description": "System-generated, regenerable." },
+    "canonical_fields": { "type": "object", "description": "Shape per item_type." },
+    "original_ids": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "common.schema.json#/$defs/original_id" } },
+    "identity_keys": { "type": "object", "description": "Dedup keys (arxiv_id, doi, url, perceptual hash...).", "additionalProperties": { "type": "string" } },
+    "status": { "type": "string", "enum": ["active", "merged", "superseded", "tombstoned"] },
+    "created_at": { "$ref": "common.schema.json#/$defs/timestamp" },
+    "updated_at": { "$ref": "common.schema.json#/$defs/timestamp" }
+  }
+}

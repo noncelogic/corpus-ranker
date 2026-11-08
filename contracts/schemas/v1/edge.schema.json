@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://noncelogic.github.io/corpus-ranker/schemas/v1/edge.schema.json",
+  "title": "Edge (SPEC A2.5)",
+  "description": "Typed link from a Ranker object to another Ranker object or, by cross-reference, to an object in another system. same_as is a reversible merge event.",
+  "type": "object",
+  "required": ["id", "from_id", "to_id", "edge_type", "created_by", "created_at", "evidence"],
+  "additionalProperties": false,
+  "properties": {
+    "id": { "$ref": "common.schema.json#/$defs/edge_id" },
+    "from_id": { "$ref": "common.schema.json#/$defs/ranker_id" },
+    "to_id": { "oneOf": [{ "$ref": "common.schema.json#/$defs/ranker_id" }, { "$ref": "common.schema.json#/$defs/cross_reference" }] },
+    "edge_type": { "type": "string", "enum": ["cites", "derived_from", "same_as", "supersedes", "evidences", "classified_under", "part_of", "artifact"] },
+    "created_by": { "$ref": "common.schema.json#/$defs/agent_identity" },
+    "created_at": { "$ref": "common.schema.json#/$defs/timestamp" },
+    "evidence": { "anyOf": [{ "$ref": "common.schema.json#/$defs/evidence_ref" }, { "type": "null" }] },
+    "reversed_at": { "$ref": "common.schema.json#/$defs/nullable_timestamp", "description": "Set when a same_as merge is split; the edge stays in history." },
+    "reversed_by": { "anyOf": [{ "$ref": "common.schema.json#/$defs/agent_identity" }, { "type": "null" }] }
+  }
+}

@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://noncelogic.github.io/corpus-ranker/schemas/v1/common.schema.json",
+  "title": "Shared definitions",
+  "description": "Building blocks shared by the A2 object schemas: opaque IDs, timestamps, agent identity, provenance (SPEC §4) and evidence pointers.",
+  "$defs": {
+    "timestamp": { "type": "string", "format": "date-time" },
+    "nullable_timestamp": { "type": ["string", "null"], "format": "date-time" },
+    "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$", "description": "Lower-case hex SHA-256 digest." },
+    "agent_identity": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9._-]*(:[a-z0-9][a-z0-9._-]*)?$",
+      "maxLength": 200,
+      "description": "Named principal from the shared identity registry (SPEC §4), e.g. joe, agent:intake-arxiv, program:paper-judge."
+    },
+    "non_empty_string": { "type": "string", "minLength": 1 },
+    "corpus_id": { "type": "string", "pattern": "^cr_corpus_[A-Za-z0-9]+$" },
+    "taxonomy_id": { "type": "string", "pattern": "^cr_tax_[A-Za-z0-9]+$" },
+    "original_id": { "type": "string", "pattern": "^cr_orig_[A-Za-z0-9]+$" },
+    "item_id": { "type": "string", "pattern": "^cr_item_[A-Za-z0-9]+$" },
+    "classification_id": { "type": "string", "pattern": "^cr_cls_[A-Za-z0-9]+$" },
+    "edge_id": { "type": "string", "pattern": "^cr_edge_[A-Za-z0-9]+$" },
+    "policy_id": { "type": "string", "pattern": "^cr_pol_[A-Za-z0-9]+$" },
+    "score_event_id": { "type": "string", "pattern": "^cr_score_[A-Za-z0-9]+$" },
+    "view_id": { "type": "string", "pattern": "^cr_view_[A-Za-z0-9]+$" },
+    "tombstone_id": { "type": "string", "pattern": "^cr_tomb_[A-Za-z0-9]+$" },
+    "ranker_id": {
+      "type": "string",
+      "pattern": "^cr_(corpus|tax|orig|item|cls|edge|pol|score|view|tomb)_[A-Za-z0-9]+$",
+      "description": "Any Ranker-owned ID."
+    },
+    "policy_version": { "type": "integer", "minimum": 1 },
+    "cross_reference": {
+      "type": "object",
+      "description": "Pointer to an object owned by another system (SPEC §4).",
+      "required": ["system", "id"],
+      "additionalProperties": false,
+      "properties": {
+        "system": { "type": "string", "enum": ["corpus-ranker", "loop-closer"] },
+        "id": { "$ref": "#/$defs/non_empty_string" },
+        "provenance": { "$ref": "#/$defs/provenance" }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "description": "The shared provenance shape (SPEC §4): source, recorded-by agent identity, time, and hash where content exists.",
+      "required": ["source_kind", "source", "recorded_by", "at"],
+      "additionalProperties": false,
+      "properties": {
+        "source_kind": { "type": "string", "enum": ["url", "feed", "inbox", "upload", "api"] },
+        "source": { "$ref": "#/$defs/non_empty_string", "description": "Where it came from: URL, feed name, inbox address, upload name or API client." },
+        "recorded_by": { "$ref": "#/$defs/agent_identity" },
+        "at": { "$ref": "#/$defs/timestamp" },
+        "hash": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "evidence_ref": {
+      "type": "object",
+      "description": "Pointer to an Original (optionally a span within it), Item or Score event that justifies a claim.",
+      "required": ["id"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "string", "pattern": "^cr_(orig|item|score)_[A-Za-z0-9]+$" },
+        "span": {
+          "type": "object",
+          "required": ["start", "end"],
+          "additionalProperties": false,
+          "properties": {
+            "start": { "type": "integer", "minimum": 0 },
+            "end": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "note": { "type": "string" }
+      }
+    }
+  }
+}

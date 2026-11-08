@@ -15,7 +15,8 @@
     "test": "node --test --test-concurrency=1 \"tests/**/*.test.ts\"",
     "test:foundation": "node --test --test-concurrency=1 \"tests/foundation/*.test.ts\"",
     "replica:up": "docker compose -f docker-compose.yaml up -d --wait",
-    "replica:down": "docker compose -f docker-compose.yaml down -v"
+    "replica:down": "docker compose -f docker-compose.yaml down -v",
+    "test:contracts": "node --test --test-concurrency=1 \"tests/contracts/*.test.ts\""
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

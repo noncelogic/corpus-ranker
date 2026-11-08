@@ -1,0 +1,23 @@
+{
+  "id": "cr_item_p0001",
+  "corpus_id": "cr_corpus_papers01",
+  "item_type": "paper",
+  "title": "Context Management for Long-Horizon Agents",
+  "summary": "Proposes a hierarchical memory for agent context.",
+  "canonical_fields": {
+    "authors": [
+      "A. Author",
+      "B. Author"
+    ],
+    "venue": "arXiv",
+    "arxiv_id": "2611.01234"
+  },
+  "original_ids": [],
+  "identity_keys": {
+    "arxiv_id": "2611.01234",
+    "url": "https://arxiv.org/abs/2611.01234"
+  },
+  "status": "active",
+  "created_at": "2026-11-07T09:05:00Z",
+  "updated_at": "2026-11-07T09:05:00Z"
+}

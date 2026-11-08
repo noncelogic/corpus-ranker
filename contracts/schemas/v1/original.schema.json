@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://noncelogic.github.io/corpus-ranker/schemas/v1/original.schema.json",
+  "title": "Original (SPEC A2.2)",
+  "description": "Immutable raw blob record. Content-addressed by SHA-256; removed only by tombstoning, which keeps the hash and provenance.",
+  "type": "object",
+  "required": ["id", "corpus_id", "content_hash", "media_type", "byte_size", "storage_uri", "source", "raw_metadata", "tombstoned_at", "tombstone_reason"],
+  "additionalProperties": false,
+  "properties": {
+    "id": { "$ref": "common.schema.json#/$defs/original_id" },
+    "corpus_id": { "$ref": "common.schema.json#/$defs/corpus_id" },
+    "content_hash": { "$ref": "common.schema.json#/$defs/sha256" },
+    "media_type": { "type": "string", "pattern": "^[a-z]+/[a-zA-Z0-9.+_-]+$" },
+    "byte_size": { "type": "integer", "minimum": 0 },
+    "storage_uri": { "type": "string", "format": "uri" },
+    "source": { "$ref": "common.schema.json#/$defs/provenance" },
+    "raw_metadata": { "type": "object", "description": "Source-native fields, e.g. arXiv ID or EXIF." },
+    "tombstoned_at": { "$ref": "common.schema.json#/$defs/nullable_timestamp" },
+    "tombstone_reason": { "type": ["string", "null"] }
+  },
+  "anyOf": [
+    { "properties": { "tombstoned_at": { "type": "null" }, "tombstone_reason": { "type": "null" } } },
+    { "properties": { "tombstoned_at": { "type": "string" }, "tombstone_reason": { "type": "string", "minLength": 1 } } }
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://noncelogic.github.io/corpus-ranker/schemas/v1/embedding-record.schema.json",
+  "title": "Embedding record (SPEC A2.10)",
+  "description": "Derived, disposable index entry; rebuildable from Originals and canonical fields. Never the record.",
+  "type": "object",
+  "required": ["item_id", "chunk_id", "embedding_model_id", "model_version", "dims", "vector", "built_at", "source_hash"],
+  "additionalProperties": false,
+  "properties": {
+    "item_id": { "$ref": "common.schema.json#/$defs/item_id" },
+    "chunk_id": { "type": ["string", "null"], "minLength": 1, "description": "Chunk within the Item, or null for a whole-item embedding." },
+    "embedding_model_id": { "type": "string", "minLength": 1 },
+    "model_version": { "type": "string", "minLength": 1 },
+    "dims": { "type": "integer", "minimum": 1 },
+    "vector": { "type": "array", "minItems": 1, "items": { "type": "number" } },
+    "built_at": { "$ref": "common.schema.json#/$defs/timestamp" },
+    "source_hash": { "$ref": "common.schema.json#/$defs/sha256" }
+  }
+}

@@ -31,6 +31,8 @@ npm test               # full suite (node:test); needs Docker for the replica te
 deployment shape locally: Postgres 17 with pgvector holding the `ranker`
 database, and MinIO (S3 API) holding the `ranker-originals` bucket. Host
 ports default to 5432 / 9000 / 9001 and can be overridden with
-`RANKER_PG_PORT`, `RANKER_MINIO_PORT`, `RANKER_MINIO_CONSOLE_PORT`.
+`RANKER_PG_PORT`, `RANKER_MINIO_PORT`, `RANKER_MINIO_CONSOLE_PORT`
+(set one to `0` to let Docker pick a free port; read it back with
+`docker compose port <service> <port>`).
 `docker compose down -v` (or `npm run replica:down`) removes it and its data.
 Credentials in `docker-compose.yaml` are local throwaways, not estate secrets.

@@ -6,7 +6,8 @@
 # Tear down:     docker compose down -v          (or: npm run replica:down)
 #
 # Credentials here are local-replica throwaways, not estate secrets.
-# Host ports are overridable so several replicas (e.g. tests) can coexist.
+# Host ports are overridable so several replicas (e.g. tests) can coexist;
+# set a port to 0 to have Docker allocate a free one (see `docker compose port`).
 # Images are pinned by digest; bump deliberately (docs/EXTERNAL-REVIEW.md §3).
 
 name: corpus-ranker
@@ -23,8 +24,16 @@ services:
     volumes:
       - postgres-data:/var/lib/postgresql/data
       - ./infra/replica/postgres-init.sql:/docker-entrypoint-initdb.d/10-pgvector.sql:ro
+    # Healthy only once the *final* server answers over TCP with the ranker
+    # database initialized: the entrypoint's temporary init server listens on
+    # the unix socket only, so a socket-based pg_isready can pass mid-init.
     healthcheck:
-      test: ["CMD", "pg_isready", "-U", "ranker", "-d", "ranker"]
+      test:
+        - CMD-SHELL
+        - >-
+          PGPASSWORD=ranker psql -h 127.0.0.1 -U ranker -d ranker -tAc
+          "select extname from pg_extension where extname = 'vector'"
+          | grep -qx vector
       interval: 2s
       timeout: 5s
       retries: 60

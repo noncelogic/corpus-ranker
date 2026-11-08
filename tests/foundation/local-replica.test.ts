@@ -4,35 +4,28 @@
 // dedicated `ranker-originals` bucket on an S3-compatible MinIO.
 //
 // Requires Docker with the Compose plugin. Each run uses its own Compose
-// project name and free host ports, and tears everything down afterwards.
+// project name, has Docker allocate host ports atomically at bind time (port
+// 0) and discovers them via `docker compose port`, and tears everything down
+// afterwards.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { createServer } from "node:net";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const composeFile = resolve(repoRoot, "docker-compose.yaml");
 
-async function freePort(): Promise<number> {
-  return new Promise((ok, fail) => {
-    const srv = createServer();
-    srv.once("error", fail);
-    srv.listen(0, "127.0.0.1", () => {
-      const addr = srv.address();
-      srv.close(() => (addr && typeof addr === "object" ? ok(addr.port) : fail(new Error("no port"))));
-    });
-  });
-}
+const sleep = (ms: number) => new Promise((ok) => setTimeout(ok, ms));
 
 test("compose replica boots postgres with pgvector plus minio", { timeout: 600_000 }, async (t) => {
   const project = `crreplica${process.pid}${Date.now() % 100000}`;
   const env = {
     ...process.env,
-    RANKER_PG_PORT: String(await freePort()),
-    RANKER_MINIO_PORT: String(await freePort()),
-    RANKER_MINIO_CONSOLE_PORT: String(await freePort()),
+    // 0 = Docker picks a free host port when it binds; no pre-probe race.
+    RANKER_PG_PORT: "0",
+    RANKER_MINIO_PORT: "0",
+    RANKER_MINIO_CONSOLE_PORT: "0",
   };
   const compose = (...args: string[]): string =>
     execFileSync("docker", ["compose", "-f", composeFile, "-p", project, ...args], {
@@ -53,9 +46,39 @@ test("compose replica boots postgres with pgvector plus minio", { timeout: 600_0
   // The one command.
   compose("up", "-d", "--wait", "--wait-timeout", "300");
 
-  // Postgres: dedicated ranker database, pgvector installed and usable.
+  // Discover the host ports Docker actually bound.
+  const hostPort = (service: string, port: number): number => {
+    const out = compose("port", service, String(port)).trim();
+    const m = /:(\d+)$/.exec(out);
+    assert.ok(m, `no published port for ${service}:${port}: ${JSON.stringify(out)}`);
+    const n = Number(m[1]);
+    assert.ok(n > 0, `${service}:${port} published on ${n}`);
+    return n;
+  };
+  const minioPort = hostPort("minio", 9000);
+  hostPort("postgres", 5432);
+
+  // Postgres: queries go over TCP, which only the final (post-init) server
+  // listens on. Gate on a successful query against the initialized ranker
+  // database, with a deadline, rather than trusting --wait alone.
   const psql = (sql: string): string =>
-    compose("exec", "-T", "postgres", "psql", "-U", "ranker", "-d", "ranker", "-tAc", sql).trim();
+    compose(
+      "exec", "-T", "-e", "PGPASSWORD=ranker", "postgres",
+      "psql", "-h", "127.0.0.1", "-U", "ranker", "-d", "ranker", "-v", "ON_ERROR_STOP=1", "-tAc", sql,
+    ).trim();
+  const deadline = Date.now() + 120_000;
+  for (;;) {
+    let last: unknown;
+    try {
+      if (psql("select extname from pg_extension where extname = 'vector'") === "vector") break;
+    } catch (err) {
+      last = err;
+    }
+    if (Date.now() > deadline) {
+      throw new Error("postgres did not become ready (TCP + initialized ranker db) within 120s", { cause: last });
+    }
+    await sleep(1000);
+  }
   assert.equal(psql("select current_database()"), "ranker");
   const extVersion = psql("select extversion from pg_extension where extname = 'vector'");
   assert.match(extVersion, /^\d+\.\d+/, "vector extension must be installed in the ranker database");
@@ -63,7 +86,7 @@ test("compose replica boots postgres with pgvector plus minio", { timeout: 600_0
   assert.equal(psql("select ('[1,0]'::vector <=> '[0,1]'::vector)::int"), "1");
 
   // MinIO: S3 API live on the published port, ranker bucket provisioned.
-  const s3 = `http://127.0.0.1:${env.RANKER_MINIO_PORT}`;
+  const s3 = `http://127.0.0.1:${minioPort}`;
   const live = await fetch(`${s3}/minio/health/live`);
   assert.equal(live.status, 200, "minio liveness endpoint");
   const ready = await fetch(`${s3}/minio/health/ready`);

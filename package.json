@@ -1,0 +1,24 @@
+{
+  "name": "corpus-ranker",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Corpus Ranker service (ranker): capture, classify and rank.",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters",
+    "start": "node dist/server.js",
+    "test": "node --test --test-concurrency=1 \"tests/**/*.test.ts\"",
+    "test:foundation": "node --test --test-concurrency=1 \"tests/foundation/*.test.ts\"",
+    "replica:up": "docker compose -f docker-compose.yaml up -d --wait",
+    "replica:down": "docker compose -f docker-compose.yaml down -v"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
+}

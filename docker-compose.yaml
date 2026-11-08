@@ -1,0 +1,75 @@
+# Local replica of the ranker's deployment shape (TECH-STACK §2, §3, §5):
+#   - Postgres with pgvector, holding the ranker's own `ranker` database
+#   - MinIO (S3 API) holding the ranker's own `ranker-originals` bucket
+#
+# One command:   docker compose up -d --wait     (or: npm run replica:up)
+# Tear down:     docker compose down -v          (or: npm run replica:down)
+#
+# Credentials here are local-replica throwaways, not estate secrets.
+# Host ports are overridable so several replicas (e.g. tests) can coexist;
+# set a port to 0 to have Docker allocate a free one (see `docker compose port`).
+# Images are pinned by digest; bump deliberately (docs/EXTERNAL-REVIEW.md §3).
+
+name: corpus-ranker
+
+services:
+  postgres:
+    image: pgvector/pgvector:0.8.1-pg17@sha256:3e8b3adfd27b5707128f60956f62a793c3c9326ea8cfaf0eab7adccb5d700b21
+    environment:
+      POSTGRES_USER: ranker
+      POSTGRES_PASSWORD: ranker
+      POSTGRES_DB: ranker
+    ports:
+      - "127.0.0.1:${RANKER_PG_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infra/replica/postgres-init.sql:/docker-entrypoint-initdb.d/10-pgvector.sql:ro
+    # Healthy only once the *final* server answers over TCP with the ranker
+    # database initialized: the entrypoint's temporary init server listens on
+    # the unix socket only, so a socket-based pg_isready can pass mid-init.
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          PGPASSWORD=ranker psql -h 127.0.0.1 -U ranker -d ranker -tAc
+          "select extname from pg_extension where extname = 'vector'"
+          | grep -qx vector
+      interval: 2s
+      timeout: 5s
+      retries: 60
+
+  # MinIO, plus provisioning of the ranker's bucket in the same container, so
+  # the service only reports healthy once the bucket exists and
+  # `docker compose up --wait` returns a replica that is ready to use.
+  minio:
+    image: cgr.dev/chainguard/minio:latest@sha256:a1ac4589a5f8136b616e667b48a0bea9719bb10bd45799ea946f24bbedfafde4
+    environment:
+      MINIO_ROOT_USER: ranker
+      MINIO_ROOT_PASSWORD: ranker-local-only
+      RANKER_BUCKET: ranker-originals
+    entrypoint: ["sh", "-c"]
+    command:
+      - |
+        rm -f /tmp/provisioned
+        minio server /data --address :9000 --console-address :9001 &
+        pid=$$!
+        trap 'kill -TERM $$pid' TERM INT
+        until mc ready local >/dev/null 2>&1; do sleep 1; done
+        mc alias set replica http://127.0.0.1:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD" >/dev/null
+        mc mb --ignore-existing "replica/$$RANKER_BUCKET"
+        touch /tmp/provisioned
+        wait $$pid
+    ports:
+      - "127.0.0.1:${RANKER_MINIO_PORT:-9000}:9000"
+      - "127.0.0.1:${RANKER_MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/provisioned && mc ready local"]
+      interval: 2s
+      timeout: 5s
+      retries: 60
+
+volumes:
+  postgres-data:
+  minio-data:

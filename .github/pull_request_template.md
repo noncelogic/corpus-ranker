@@ -15,6 +15,8 @@ Reviewers review the diff, not this description — keep it factual.
 
 Closes #
 
+Linked issue (external contributions): #___ — accepted by a maintainer before this PR was opened
+
 ## Dependency changes
 
 <!-- Delete the line that does not apply. -->

@@ -1,0 +1,6 @@
+{"arxiv_id":"2610.10008","title":"Paper H","published":"2026-10-20","scores":{"relevance":2,"technical_merit":4},"scorer":"joe","scored_at":"2026-10-20"}
+{"arxiv_id":"arXiv:2610.10006v2","title":"Paper F (v2)","published":"2026-10-21","scores":{"relevance":5,"technical_merit":5},"reasons":{"relevance":"Now squarely on point.","technical_merit":"v2 adds the missing ablation."},"scorer":"joe","scored_at":"2026-10-21"}
+{"arxiv_id":"2610.10009","title":"Paper I","published":"2026-10-21","scores":{"relevance":4,"technical_merit":5},"scorer":"joe","scored_at":"2026-10-21"}
+{"arxiv_id":"2610.10010","title":"Paper J","published":"2026-10-22","scores":{"relevance":5,"technical_merit":3},"scorer":"program:paper-judge","model":"claude-opus-4-1","scored_at":"2026-10-22T08:00:00Z"}
+{"arxiv_id":"2610.10011","title":"Paper K","published":"2026-10-22","scores":{"relevance":4,"technical_merit":4},"scorer":"program:paper-judge","model":"claude-opus-4-1","scored_at":"2026-10-22T08:05:00Z"}
+{"url":"https://arxiv.org/abs/2610.10003v2","title":"Paper C (late-filed earlier score)","published":"2026-10-14","scores":{"relevance":4,"technical_merit":4},"scorer":"joe","scored_at":"2026-10-12"}

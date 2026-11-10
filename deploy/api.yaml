@@ -1,0 +1,86 @@
+# The ranker REST API. Env names are the frozen config contract read by
+# src/config.ts; tests/deploy/manifests.test.ts holds them to it.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ranker-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ranker-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ranker-api
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: api
+          image: ghcr.io/noncelogic/corpus-ranker
+          env:
+            - name: RANKER_HOST
+              value: 0.0.0.0
+            - name: RANKER_PORT
+              value: "8080"
+            - name: RANKER_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: ranker-db-app
+                  key: uri
+            - name: RANKER_S3_ENDPOINT
+              value: http://ranker-minio.corpus-ranker.svc.cluster.local:9000
+            - name: RANKER_S3_BUCKET
+              value: ranker-originals
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+          volumeMounts:
+            - name: api-keys
+              mountPath: /etc/ranker/api-keys
+              readOnly: true
+      volumes:
+        - name: api-keys
+          secret:
+            secretName: ranker-api-keys
+---
+# Estate-internal only (ClusterIP); deliberately no Ingress.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ranker-api
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: ranker-api
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

@@ -151,20 +151,20 @@ function contractErrors(value: unknown, file: string, fragment = ""): string[] {
   return registry.validate(value, schemaUri(file) + fragment).map((e) => `${e.instancePath || "/"} ${e.message}`);
 }
 
-function sha256(bytes: Uint8Array | string): string {
+export function sha256(bytes: Uint8Array | string): string {
   return createHash("sha256").update(bytes).digest("hex");
 }
 
-function shortId(prefix: string, ...parts: string[]): string {
+export function shortId(prefix: string, ...parts: string[]): string {
   return `${prefix}${sha256(parts.join("\0")).slice(0, 24)}`;
 }
 
-function isObject(v: unknown): v is Record<string, unknown> {
+export function isObject(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
 /** Split into lines on LF (dropping a CR before it), keeping each line's exact bytes. */
-function splitLines(data: Uint8Array): Buffer[] {
+export function splitLines(data: Uint8Array): Buffer[] {
   const buf = Buffer.from(data.buffer, data.byteOffset, data.byteLength);
   const out: Buffer[] = [];
   let start = 0;
@@ -179,7 +179,7 @@ function splitLines(data: Uint8Array): Buffer[] {
   return out;
 }
 
-function recordArxivId(rec: Record<string, unknown>): string | undefined {
+export function recordArxivId(rec: Record<string, unknown>): string | undefined {
   for (const key of ["arxiv_id", "url", "abs_url", "pdf_url"]) {
     const v = rec[key];
     if (typeof v === "string") {

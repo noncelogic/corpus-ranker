@@ -1,0 +1,7 @@
+{"arxiv_id":"2610.10001","title":"Paper A","published":"2026-10-13","scores":{"relevance":5,"technical_merit":5},"scorer":"joe","scored_at":"2026-10-13"}
+{"arxiv_id":"2610.10002","title":"Paper B","published":"2026-10-13","scores":{"relevance":5,"technical_merit":4},"scorer":"program:paper-judge","model":"claude-opus-4-1","scored_at":"2026-10-13T10:00:00Z"}
+{"arxiv_id":"2610.10003","title":"Paper C","published":"2026-10-14","scores":{"relevance":4,"technical_merit":5},"scorer":"program:paper-judge","model":"claude-opus-4-1","scored_at":"2026-10-14T09:00:00Z"}
+{"arxiv_id":"2610.10004","title":"Paper D","published":"2026-10-14","scores":{"relevance":3,"technical_merit":3},"scorer":"joe","scored_at":"2026-10-14"}
+{"arxiv_id":"2610.10005","title":"Paper E (unscored)","published":"2026-10-15"}
+{"arxiv_id":"2610.10006","title":"Paper F","published":"2026-10-15","scores":{"relevance":4,"technical_merit":4},"scorer":"program:paper-judge","model":"claude-opus-4-1","scored_at":"2026-10-15T09:00:00Z"}
+{"arxiv_id":"2610.10007","title":"Paper G","published":"2026-10-15","scores":{"relevance":5,"technical_merit":5},"scorer":"program:paper-judge","model":"claude-opus-4-1","scored_at":"2026-10-15T09:30:00Z"}

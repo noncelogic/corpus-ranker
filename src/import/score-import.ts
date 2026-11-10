@@ -38,7 +38,7 @@ export interface ScoreImportReport {
 }
 
 /** File keys for each paper-rubric v1 dimension. */
-const DIMENSION_KEYS: [dimension: string, keys: string[]][] = [
+export const DIMENSION_KEYS: [dimension: string, keys: string[]][] = [
   ["Relevance", ["relevance", "Relevance"]],
   ["Technical Merit", ["technical_merit", "technicalMerit", "Technical Merit"]],
 ];
@@ -46,7 +46,7 @@ const DIMENSION_KEYS: [dimension: string, keys: string[]][] = [
 const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
 const DATE_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
 
-function pick(obj: Record<string, unknown>, keys: string[]): unknown {
+export function pick(obj: Record<string, unknown>, keys: string[]): unknown {
   for (const k of keys) if (obj[k] !== undefined) return obj[k];
   return undefined;
 }

@@ -264,6 +264,26 @@ export class RankerKernel {
     return this.#record(this.#checkScore(input));
   }
 
+  /**
+   * Records a Score made before this kernel existed (SPEC §A7 Phase 0 import),
+   * keeping its original `scored_at` and a caller-chosen id. It is checked
+   * exactly like `score`; recording the same id twice is refused.
+   */
+  importScore(input: ScoreInput & { id: string; scored_at: string }): ScoreEvent {
+    const checked = this.#checkScore(input);
+    const candidate: ScoreEvent = {
+      id: input.id,
+      ...checked,
+      scored_at: input.scored_at,
+      retracted_at: null,
+      retracted_by: null,
+      retraction_reason: null,
+    };
+    const errors = this.#registry.validate(candidate, schemaUri("score-event.schema.json"));
+    if (errors.length) throw new KernelError("invalid_score", `score does not match the contract: ${describe(errors)}`, errors);
+    return this.#record(checked, { id: input.id, scored_at: input.scored_at });
+  }
+
   /** Validates a score against the contract and its cited Policy version; returns it with no id or time yet. */
   #checkScore(input: ScoreInput): ScoreInput {
     const policy = this.#requirePolicy(input.policy_id, input.policy_version);
@@ -307,18 +327,20 @@ export class RankerKernel {
     return structuredClone(fields);
   }
 
-  #record(input: ScoreInput): ScoreEvent {
-    const id = this.#newId();
+  #record(input: ScoreInput, historical?: { id: string; scored_at: string }): ScoreEvent {
+    const id = historical?.id ?? this.#newId();
     if (this.#scores.has(id)) throw new KernelError("invalid_score", `score id ${id} already recorded`);
+    const at = this.#timestamp();
     const stored = frozenCopy<ScoreEvent>({
       id,
       ...input,
-      scored_at: this.#timestamp(),
+      scored_at: historical?.scored_at ?? at,
       retracted_at: null,
       retracted_by: null,
       retraction_reason: null,
     });
-    this.#append({ type: "score_recorded", at: stored.scored_at, score: stored });
+    // The log entry's `at` is when it was recorded here; an imported score keeps its own `scored_at`.
+    this.#append({ type: "score_recorded", at, score: stored });
     this.#scores.set(stored.id, stored);
     return this.getScore(stored.id)!;
   }

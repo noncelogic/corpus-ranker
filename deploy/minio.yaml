@@ -1,0 +1,113 @@
+# The ranker's own S3-compatible object store (TECH-STACK §5): one MinIO
+# instance on a PVC, holding the `ranker-originals` bucket. As in the local
+# replica (docker-compose.yaml), the container provisions the bucket itself
+# and only reports ready once it exists. Root credentials come from the
+# `ranker-minio` ExternalSecret.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ranker-minio-data
+spec:
+  accessModes: ["ReadWriteOnce"]
+  storageClassName: managed-csi-premium
+  resources:
+    requests:
+      storage: 20Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ranker-minio
+spec:
+  replicas: 1
+  # ReadWriteOnce volume: never run two pods against it.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ranker-minio
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ranker-minio
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: minio
+          image: cgr.dev/chainguard/minio:latest@sha256:a1ac4589a5f8136b616e667b48a0bea9719bb10bd45799ea946f24bbedfafde4
+          env:
+            - name: RANKER_BUCKET
+              value: ranker-originals
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: ranker-minio
+                  key: MINIO_ROOT_USER
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ranker-minio
+                  key: MINIO_ROOT_PASSWORD
+            - name: MC_CONFIG_DIR
+              value: /tmp/mc
+          command: ["sh", "-c"]
+          args:
+            - |
+              rm -f /tmp/provisioned
+              minio server /data --address :9000 --console-address :9001 &
+              pid=$!
+              trap 'kill -TERM $pid' TERM INT
+              until mc ready local >/dev/null 2>&1; do sleep 1; done
+              mc alias set ranker http://127.0.0.1:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null
+              mc mb --ignore-existing "ranker/$RANKER_BUCKET"
+              touch /tmp/provisioned
+              wait $pid
+          ports:
+            - name: s3
+              containerPort: 9000
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "test -f /tmp/provisioned"]
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /minio/health/live
+              port: s3
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 1Gi
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: ranker-minio-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ranker-minio
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: ranker-minio
+  ports:
+    - name: s3
+      port: 9000
+      targetPort: s3

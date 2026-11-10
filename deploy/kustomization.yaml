@@ -1,0 +1,25 @@
+# Corpus Ranker on aks-obs-01 (TECH-STACK §10): one namespace, the ranker's
+# own CNPG Postgres cluster (pgvector) and MinIO bucket, the API, and
+# ExternalSecrets resolved from the estate OpenBao ClusterSecretStore.
+#
+# Manifests only. No CI step applies these; rollout is estate-side GitOps
+# (Argo). Render locally with:  kustomize build deploy/
+# No Ingress: the API is reachable estate-internally via its ClusterIP Service.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: corpus-ranker
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: corpus-ranker
+    includeSelectors: false
+resources:
+  - namespace.yaml
+  - externalsecrets.yaml
+  - database.yaml
+  - minio.yaml
+  - api.yaml
+images:
+  # The CI image job publishes ghcr.io/noncelogic/corpus-ranker:sha-<commit>
+  # and :main. Estate-side GitOps pins the tag (or digest) it rolls out here.
+  - name: ghcr.io/noncelogic/corpus-ranker
+    newTag: main

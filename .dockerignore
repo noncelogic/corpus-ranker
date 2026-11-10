@@ -1,0 +1,10 @@
+.git
+.github
+node_modules
+dist
+tests
+deploy
+docs
+infra
+*.md
+docker-compose.yaml

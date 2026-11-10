@@ -1,0 +1,24 @@
+# The ranker's own Postgres (TECH-STACK §2, §3): a CloudNativePG Cluster
+# reconciled by the estate operator already running in `pg-system` (no
+# operator is installed here). The CNPG "standard" image ships pgvector; the
+# extension is created in the `ranker` database at bootstrap.
+#
+# CNPG generates the app credentials secret `ranker-db-app` (key `uri` is the
+# full connection string) and the read-write Service `ranker-db-rw`.
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: ranker-db
+spec:
+  instances: 2
+  imageName: ghcr.io/cloudnative-pg/postgresql:17.7-standard-trixie@sha256:e079dae5253fa6ed26fc65fda06d515af764dbec392dd4b46b17ab11eebd8131
+  primaryUpdateStrategy: unsupervised
+  bootstrap:
+    initdb:
+      database: ranker
+      owner: ranker
+      postInitApplicationSQL:
+        - CREATE EXTENSION IF NOT EXISTS vector
+  storage:
+    size: 20Gi
+    storageClass: managed-csi-premium

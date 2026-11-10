@@ -12,6 +12,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "tsc -p tsconfig.json --noEmit --noUnusedLocals --noUnusedParameters",
     "start": "node dist/server.js",
+    "export": "node src/export/cli.ts export",
+    "restore": "node src/export/cli.ts restore",
     "test": "node --test --test-concurrency=1 \"tests/**/*.test.ts\"",
     "test:foundation": "node --test --test-concurrency=1 \"tests/foundation/*.test.ts\"",
     "replica:up": "docker compose -f docker-compose.yaml up -d --wait",

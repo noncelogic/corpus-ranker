@@ -1,0 +1,8 @@
+{"arxiv_id":"2611.01234","title":"Context Management for Long-Horizon Agents","authors":["A. Author","B. Author"],"abstract":"Proposes a hierarchical memory for agent context.","published":"2026-11-03","provenance":{"source_kind":"feed","source":"https://export.arxiv.org/rss/cs.AI","recorded_by":"agent:intake-arxiv","at":"2026-11-03T08:00:00Z"}}
+{"arxiv_id":"2611.02345","title":"Rubric-Guided Judging of Research Papers","authors":["C. Author"],"abstract":"Scores papers against versioned rubrics.","published":"2026-11-04","doi":"10.48550/arXiv.2611.02345","provenance":{"source_kind":"feed","source":"https://export.arxiv.org/rss/cs.CL","recorded_by":"agent:intake-arxiv","at":"2026-11-04T08:00:00Z"}}
+
+{"arxiv_id":"arXiv:2611.01234v2","title":"Context Management for Long-Horizon Agents (v2)","authors":["A. Author","B. Author"],"abstract":"Revised.","published":"2026-11-05","provenance":{"source_kind":"url","source":"https://arxiv.org/abs/2611.01234v2","recorded_by":"joe","at":"2026-11-05T12:30:00Z"}}
+{"arxiv_id":"2611.02345","title":"Rubric-Guided Judging of Research Papers","authors":["C. Author"],"abstract":"Scores papers against versioned rubrics.","published":"2026-11-04","doi":"10.48550/arXiv.2611.02345","provenance":{"source_kind":"feed","source":"https://export.arxiv.org/rss/cs.CL","recorded_by":"agent:intake-arxiv","at":"2026-11-04T08:00:00Z"}}
+{"url":"https://arxiv.org/abs/2611.03456","title":"Sparse Retrieval Without Vectors","authors":["D. Author"],"published":"2026-11-06"}
+{"title":"A record with no arXiv identifier"}
+{not json

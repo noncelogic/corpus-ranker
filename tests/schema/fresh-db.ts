@@ -3,7 +3,7 @@
 // versioned migrations in order, and exposes psql over `docker compose exec`
 // (no Postgres client dependency on the host).
 import type { TestContext } from "node:test";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { listMigrations } from "../../src/db/migrations.ts";
@@ -17,9 +17,18 @@ export interface FreshDb {
   psql(sql: string): string;
   /** Run SQL as the given role (via SET ROLE), returning output or throwing with psql's stderr. */
   psqlAs(role: string, sql: string): string;
+  /** Run pg_dump against the database with the given arguments; returns its stdout. */
+  pgDump(args: readonly string[]): string;
+  /** Start a long-lived psql as the migration owner, reading SQL from stdin (flags as psql). */
+  psqlProcess(): ChildProcessWithoutNullStreams;
 }
 
-export async function freshDatabase(t: TestContext): Promise<FreshDb> {
+export interface FreshDbOptions {
+  /** Apply the versioned migrations (default true); false leaves an empty instance. */
+  migrate?: boolean;
+}
+
+export async function freshDatabase(t: TestContext, options: FreshDbOptions = {}): Promise<FreshDb> {
   const project = `crschema${process.pid}${Date.now() % 100000}`;
   const env = { ...process.env, RANKER_PG_PORT: "0", RANKER_MINIO_PORT: "0", RANKER_MINIO_CONSOLE_PORT: "0" };
   const compose = (args: string[], input?: string): string => {
@@ -46,15 +55,12 @@ export async function freshDatabase(t: TestContext): Promise<FreshDb> {
 
   compose(["up", "-d", "--wait", "--wait-timeout", "300", "postgres"]);
 
-  const run = (sql: string): string =>
-    compose(
-      [
-        "exec", "-T", "-e", "PGPASSWORD=ranker", "postgres",
-        "psql", "-h", "127.0.0.1", "-U", "ranker", "-d", "ranker", "-X", "-q",
-        "-v", "ON_ERROR_STOP=1", "-tA", "-f", "-",
-      ],
-      sql,
-    ).trim();
+  const psqlArgs = [
+    "exec", "-T", "-e", "PGPASSWORD=ranker", "postgres",
+    "psql", "-h", "127.0.0.1", "-U", "ranker", "-d", "ranker", "-X", "-q",
+    "-v", "ON_ERROR_STOP=1", "-tA", "-f", "-",
+  ];
+  const run = (sql: string): string => compose(psqlArgs, sql).trim();
 
   const deadline = Date.now() + 120_000;
   for (;;) {
@@ -68,12 +74,25 @@ export async function freshDatabase(t: TestContext): Promise<FreshDb> {
     await sleep(1000);
   }
 
-  for (const m of listMigrations()) {
-    run(`\\set ON_ERROR_STOP 1\nBEGIN;\n${m.sql}\nCOMMIT;\n`);
+  if (options.migrate !== false) {
+    for (const m of listMigrations()) {
+      run(`\\set ON_ERROR_STOP 1\nBEGIN;\n${m.sql}\nCOMMIT;\n`);
+    }
   }
 
   return {
     psql: run,
     psqlAs: (role, sql) => run(`SET ROLE ${role};\n${sql}`),
+    pgDump: (args) =>
+      compose([
+        "exec", "-T", "-e", "PGPASSWORD=ranker", "postgres",
+        "pg_dump", "-h", "127.0.0.1", "-U", "ranker", "-d", "ranker", ...args,
+      ]),
+    psqlProcess: () =>
+      spawn("docker", ["compose", "-f", composeFile, "-p", project, ...psqlArgs], {
+        cwd: repoRoot,
+        env,
+        stdio: ["pipe", "pipe", "pipe"],
+      }),
   };
 }

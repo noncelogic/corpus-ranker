@@ -9,23 +9,34 @@
 // stay in the object store, named by content hash; originals.jsonl is the
 // manifest that ties each one to its hash and provenance.
 //
+// exportBundle reads everything from one snapshot: a held repeatable-read
+// transaction exports its snapshot, pg_dump runs on that snapshot, and the
+// JSONL is read inside the same transaction, so concurrent corpus writes
+// cannot make the dump and the JSONL disagree.
+//
 // restoreBundle loads database.sql into an empty database (a fresh instance)
 // after checking every file against the manifest, then re-derives the JSONL
-// from the restored database and requires it to match the manifest, so a
-// successful restore is proof the corpus came back whole.
-import { execFileSync } from "node:child_process";
+// from the restored database inside the loading transaction and commits only
+// if it matches the manifest, so a successful restore is proof the corpus came
+// back whole and a failed one leaves the target empty.
+import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 export const BUNDLE_VERSION = 1;
 
-/** The two capabilities export/restore need from a Postgres database. */
+/** The capabilities export/restore need from a Postgres database. */
 export interface PgSession {
   /** Run SQL (psql semantics, stop on first error); returns tuples-only, unaligned output. */
   query(sql: string): string;
   /** Run pg_dump with the given arguments; returns the plain-SQL dump. */
   dump(args: readonly string[]): string;
+  /**
+   * Start one long-lived psql (same flags as query, reading SQL from stdin)
+   * so a transaction can stay open across several steps.
+   */
+  open(): ChildProcessWithoutNullStreams;
 }
 
 export interface BundleFile {
@@ -127,18 +138,20 @@ const JSONL_QUERIES: Readonly<Record<string, string>> = {
 const sha256 = (b: Buffer | string) => createHash("sha256").update(b).digest("hex");
 const fileMeta = (b: Buffer): BundleFile => ({ sha256: sha256(b), bytes: b.length });
 
-/** Derive every JSONL file from the database, read in one repeatable-read snapshot. */
-function extractJsonl(db: PgSession): { files: Map<string, Buffer>; counts: Record<string, number> } {
-  // Each query's rows are framed by a marker line so all files come from one
-  // snapshot while staying separable. JSON text never contains a raw newline.
+const marker = (name: string) => `--cr-export:${name}--`;
+
+/** SQL deriving every JSONL file; run it inside a transaction so all files share one snapshot. */
+function jsonlSql(): string {
+  // Each query's rows are framed by a marker line so the files stay
+  // separable. JSON text never contains a raw newline.
+  return Object.keys(JSONL_QUERIES)
+    .flatMap((n) => [`select '${marker(n)}';`, `${JSONL_QUERIES[n]!.trim()};`])
+    .join("\n");
+}
+
+/** Split the output of jsonlSql() into the JSONL files. */
+function parseJsonl(output: string): { files: Map<string, Buffer>; counts: Record<string, number> } {
   const names = Object.keys(JSONL_QUERIES);
-  const marker = (name: string) => `--cr-export:${name}--`;
-  const sql = [
-    "begin transaction isolation level repeatable read read only;",
-    ...names.flatMap((n) => [`select '${marker(n)}';`, `${JSONL_QUERIES[n]!.trim()};`]),
-    "commit;",
-  ].join("\n");
-  const lines = db.query(sql).split("\n");
   const files = new Map<string, Buffer>();
   const counts: Record<string, number> = {};
   let current: string[] | undefined;
@@ -148,7 +161,7 @@ function extractJsonl(db: PgSession): { files: Map<string, Buffer>; counts: Reco
     counts[name] = current.length;
   };
   let name: string | undefined;
-  for (const raw of lines) {
+  for (const raw of output.split("\n")) {
     const line = raw.trim();
     const next = names.find((n) => line === marker(n));
     if (next !== undefined) {
@@ -164,13 +177,106 @@ function extractJsonl(db: PgSession): { files: Map<string, Buffer>; counts: Reco
   return { files, counts };
 }
 
+/**
+ * A psql process driven step by step over stdin, so one transaction can span
+ * several steps. psql runs with ON_ERROR_STOP, so any SQL error ends the
+ * process and the open transaction is rolled back by the server.
+ */
+class PsqlConversation {
+  private out = "";
+  private err = "";
+  private exited: Promise<number | null>;
+  private exitCode: number | null | undefined;
+  private waiter: (() => void) | undefined;
+  private seq = 0;
+  private readonly child: ChildProcessWithoutNullStreams;
+
+  constructor(child: ChildProcessWithoutNullStreams) {
+    this.child = child;
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (d: string) => {
+      this.out += d;
+      this.waiter?.();
+    });
+    child.stderr.on("data", (d: string) => {
+      this.err += d;
+    });
+    child.stdin.on("error", () => {
+      /* surfaced through the exit code */
+    });
+    this.exited = new Promise((ok) => {
+      child.on("error", (e) => {
+        this.err += String(e);
+      });
+      child.on("close", (code) => {
+        this.exitCode = code;
+        this.waiter?.();
+        ok(code);
+      });
+    });
+  }
+
+  /** Send SQL and resolve with its output once psql has executed all of it. */
+  run(sql: string): Promise<string> {
+    const done = `--cr-step-${++this.seq}--`;
+    this.child.stdin.write(`${sql}\n;\nselect '${done}';\n`);
+    return new Promise((ok, fail) => {
+      const check = () => {
+        const at = this.out.indexOf(`${done}\n`);
+        if (at >= 0) {
+          const result = this.out.slice(0, at);
+          this.out = this.out.slice(at + done.length + 1);
+          this.waiter = undefined;
+          ok(result);
+        } else if (this.exitCode !== undefined) {
+          this.waiter = undefined;
+          fail(new Error(`psql exited (${String(this.exitCode)}): ${this.err.trim()}`));
+        }
+      };
+      this.waiter = check;
+      check();
+    });
+  }
+
+  /** Send the final SQL, end the session and wait for psql to exit cleanly. */
+  async close(sql: string): Promise<void> {
+    this.child.stdin.end(`${sql}\n`);
+    const code = await this.exited;
+    if (code !== 0) throw new Error(`psql exited (${String(code)}): ${this.err.trim()}`);
+  }
+
+  /** Abandon the session; the server rolls back any open transaction. */
+  kill(): void {
+    if (this.exitCode === undefined) this.child.kill();
+  }
+}
+
 /** Produce the A5 bundle for the whole database into outDir (created if needed). */
-export function exportBundle(db: PgSession, outDir: string, options: ExportOptions = {}): BundleManifest {
+export async function exportBundle(db: PgSession, outDir: string, options: ExportOptions = {}): Promise<BundleManifest> {
   const now = options.now ?? (() => new Date());
   const exportedAt = now().toISOString();
-  const schemaVersion = Number(db.query("select coalesce(max(version), 0) from schema_migrations"));
-  const dump = Buffer.from(db.dump(DUMP_ARGS), "utf8");
-  const { files, counts } = extractJsonl(db);
+
+  // Hold one read-only repeatable-read transaction for the whole export: its
+  // exported snapshot is what pg_dump reads, and the JSONL and schema version
+  // are read inside it, so every file reflects the same database state.
+  const tx = new PsqlConversation(db.open());
+  let schemaVersion: number;
+  let dump: Buffer;
+  let extracted: ReturnType<typeof parseJsonl>;
+  try {
+    const snapshot = (
+      await tx.run("begin transaction isolation level repeatable read read only;\nselect pg_export_snapshot();")
+    ).trim();
+    if (!/^[0-9A-Fa-f-]+$/.test(snapshot)) throw new Error(`export: unexpected snapshot id ${JSON.stringify(snapshot)}`);
+    dump = Buffer.from(db.dump([...DUMP_ARGS, `--snapshot=${snapshot}`]), "utf8");
+    schemaVersion = Number((await tx.run("select coalesce(max(version), 0) from schema_migrations;")).trim());
+    extracted = parseJsonl(await tx.run(jsonlSql()));
+    await tx.close("commit;");
+  } finally {
+    tx.kill();
+  }
+  const { files, counts } = extracted;
   files.set(DATABASE_FILE, dump);
 
   mkdirSync(outDir, { recursive: true });
@@ -222,22 +328,31 @@ $$;
 
 /**
  * Restore a bundle into an empty database (a fresh instance): verify the
- * files, load the dump in one transaction, then require the restored
- * database to re-derive exactly the bundle's JSONL.
+ * files, load the dump in one transaction and, inside that transaction,
+ * require the restored data to re-derive exactly the bundle's JSONL; commit
+ * only then, so a failed restore leaves the target empty for a retry.
  */
-export function restoreBundle(db: PgSession, dir: string): BundleManifest {
+export async function restoreBundle(db: PgSession, dir: string): Promise<BundleManifest> {
   const manifest = verifyBundle(dir);
   const tables = Number(db.query("select count(*) from pg_tables where schemaname = 'public'"));
   if (tables !== 0) throw new Error(`restore target is not empty (${tables} tables in schema public)`);
 
   const dump = readFileSync(join(dir, DATABASE_FILE), "utf8");
-  db.query(`${RESTORE_PREAMBLE}\nBEGIN;\n${dump}\nCOMMIT;\n`);
-
-  const { files } = extractJsonl(db);
-  for (const [file, bytes] of files) {
-    if (sha256(bytes) !== manifest.files[file]!.sha256) {
-      throw new Error(`${file}: restored database does not reproduce the bundle`);
+  const tx = new PsqlConversation(db.open());
+  try {
+    await tx.run(RESTORE_PREAMBLE);
+    // The dump empties search_path for the session; restore it for the check.
+    await tx.run(`BEGIN;\n${dump}\n;\nRESET search_path;`);
+    const { files } = parseJsonl(await tx.run(jsonlSql()));
+    for (const [file, bytes] of files) {
+      if (sha256(bytes) !== manifest.files[file]!.sha256) {
+        await tx.close("ROLLBACK;");
+        throw new Error(`${file}: restored database does not reproduce the bundle`);
+      }
     }
+    await tx.close("COMMIT;");
+  } finally {
+    tx.kill();
   }
   return manifest;
 }
@@ -246,8 +361,10 @@ export function restoreBundle(db: PgSession, dir: string): BundleManifest {
 export function cliSession(databaseUrl: string): PgSession {
   const run = (bin: string, args: readonly string[], input?: string) =>
     execFileSync(bin, args, { input, encoding: "utf8", maxBuffer: 1 << 30, stdio: ["pipe", "pipe", "pipe"] });
+  const psqlArgs = ["-X", "-q", "-v", "ON_ERROR_STOP=1", "-tA", "-f", "-", "-d", databaseUrl];
   return {
-    query: (sql) => run("psql", ["-X", "-q", "-v", "ON_ERROR_STOP=1", "-tA", "-f", "-", "-d", databaseUrl], sql).trim(),
+    query: (sql) => run("psql", psqlArgs, sql).trim(),
     dump: (args) => run("pg_dump", [...args, "-d", databaseUrl]),
+    open: () => spawn("psql", psqlArgs, { stdio: ["pipe", "pipe", "pipe"] }),
   };
 }

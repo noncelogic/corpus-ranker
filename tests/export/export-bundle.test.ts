@@ -13,7 +13,7 @@ import { BUNDLE_VERSION, exportBundle, restoreBundle, type PgSession } from "../
 import { freshDatabase, type FreshDb } from "../schema/fresh-db.ts";
 
 const H = (c: string) => c.repeat(64);
-const session = (db: FreshDb): PgSession => ({ query: db.psql, dump: db.pgDump });
+const session = (db: FreshDb): PgSession => ({ query: db.psql, dump: db.pgDump, open: db.psqlProcess });
 
 // A small corpus touching every A2 table, with awkward text (quotes, newline,
 // unicode) to exercise JSON escaping, a tombstoned Original, a retracted
@@ -118,7 +118,7 @@ test("export then restore into a fresh database reproduces the corpus", { timeou
 
   // One command produces the bundle.
   const bundleDir = join(tmp, "bundle");
-  const manifest = exportBundle(session(source), bundleDir, { now: () => new Date("2026-11-10T00:00:00Z") });
+  const manifest = await exportBundle(session(source), bundleDir, { now: () => new Date("2026-11-10T00:00:00Z") });
 
   // manifest.json: version, export time, counts, hashes of every file.
   assert.deepEqual(JSON.parse(readFileSync(join(bundleDir, "manifest.json"), "utf8")), manifest);
@@ -182,13 +182,28 @@ test("export then restore into a fresh database reproduces the corpus", { timeou
 
   // A tampered bundle is refused before anything is loaded.
   const tampered = join(tmp, "tampered");
-  exportBundle(session(source), tampered);
+  await exportBundle(session(source), tampered);
   writeFileSync(join(tampered, "items.jsonl"), readFileSync(join(tampered, "items.jsonl"), "utf8").replace("Paper Two", "Paper 2"));
-  assert.throws(() => restoreBundle(session(fresh), tampered), /items\.jsonl: sha256 mismatch/);
+  await assert.rejects(restoreBundle(session(fresh), tampered), /items\.jsonl: sha256 mismatch/);
+  assert.equal(fresh.psql("select count(*) from pg_tables where schemaname = 'public'"), "0");
+
+  // A bundle whose dump does not reproduce its JSONL fails the restore, and the
+  // failed restore is rolled back so the target stays empty for a retry.
+  const inconsistent = join(tmp, "inconsistent");
+  await exportBundle(session(source), inconsistent);
+  const badDump = readFileSync(join(inconsistent, "database.sql"), "utf8").replace("Paper Two", "Paper 2");
+  writeFileSync(join(inconsistent, "database.sql"), badDump);
+  const badManifest = JSON.parse(readFileSync(join(inconsistent, "manifest.json"), "utf8"));
+  badManifest.files["database.sql"] = {
+    sha256: createHash("sha256").update(badDump).digest("hex"),
+    bytes: Buffer.byteLength(badDump),
+  };
+  writeFileSync(join(inconsistent, "manifest.json"), JSON.stringify(badManifest));
+  await assert.rejects(restoreBundle(session(fresh), inconsistent), /items\.jsonl: restored database does not reproduce the bundle/);
   assert.equal(fresh.psql("select count(*) from pg_tables where schemaname = 'public'"), "0");
 
   // The fresh instance (no migrations, no prior data) restores from the bundle alone.
-  const restored = restoreBundle(session(fresh), bundleDir);
+  const restored = await restoreBundle(session(fresh), bundleDir);
   assert.deepEqual(restored, manifest);
 
   // Every record table is reproduced row for row; derived embeddings are not carried.
@@ -206,10 +221,43 @@ test("export then restore into a fresh database reproduces the corpus", { timeou
   assert.equal(fresh.psqlAs("ranker_app", "select count(*) from items"), "2");
 
   // Re-exporting the restored instance yields byte-identical records.
-  const again = exportBundle(session(fresh), join(tmp, "again"), { now: () => new Date("2026-11-10T00:00:00Z") });
+  const again = await exportBundle(session(fresh), join(tmp, "again"), { now: () => new Date("2026-11-10T00:00:00Z") });
   for (const file of Object.keys(SCHEMAS)) assert.equal(again.files[file]!.sha256, manifest.files[file]!.sha256, file);
   assert.deepEqual(again.counts, manifest.counts);
 
   // Restore refuses a target that already holds a schema.
-  assert.throws(() => restoreBundle(session(fresh), bundleDir), /not empty/);
+  await assert.rejects(restoreBundle(session(fresh), bundleDir), /not empty/);
+});
+
+test("an export taken during concurrent corpus writes restores from one consistent snapshot", { timeout: 900_000 }, async (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), "cr-export-"));
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+
+  const [source, fresh] = await Promise.all([freshDatabase(t), freshDatabase(t, { migrate: false })]);
+  source.psql(SEED);
+  const before = snapshot(source, "items", "id");
+
+  // Ordinary corpus writes commit while the export runs: one just before
+  // pg_dump reads, one between the dump and the JSONL.
+  const write = (title: string) =>
+    source.psql(`update items set title = '${title}', updated_at = now() where id = 'cr_item_p1'`);
+  const busy: PgSession = {
+    ...session(source),
+    dump: (args) => {
+      write("Written before the dump");
+      const out = source.pgDump(args);
+      write("Written after the dump");
+      return out;
+    },
+  };
+  const bundleDir = join(tmp, "bundle");
+  const manifest = await exportBundle(busy, bundleDir);
+  assert.equal(source.psql("select title from items where id = 'cr_item_p1'"), "Written after the dump");
+
+  // Dump and JSONL both reflect the state when the export began.
+  assert.equal(readJsonl(bundleDir, "items.jsonl")[0]!.title, 'Context "Management" for Long-Horizon Agents');
+
+  // The bundle restores, and the restored items are the pre-write corpus.
+  assert.deepEqual(await restoreBundle(session(fresh), bundleDir), manifest);
+  assert.equal(snapshot(fresh, "items", "id"), before);
 });

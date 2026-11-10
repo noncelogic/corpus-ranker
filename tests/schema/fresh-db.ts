@@ -3,7 +3,7 @@
 // versioned migrations in order, and exposes psql over `docker compose exec`
 // (no Postgres client dependency on the host).
 import type { TestContext } from "node:test";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { listMigrations } from "../../src/db/migrations.ts";
@@ -19,6 +19,8 @@ export interface FreshDb {
   psqlAs(role: string, sql: string): string;
   /** Run pg_dump against the database with the given arguments; returns its stdout. */
   pgDump(args: readonly string[]): string;
+  /** Start a long-lived psql as the migration owner, reading SQL from stdin (flags as psql). */
+  psqlProcess(): ChildProcessWithoutNullStreams;
 }
 
 export interface FreshDbOptions {
@@ -53,15 +55,12 @@ export async function freshDatabase(t: TestContext, options: FreshDbOptions = {}
 
   compose(["up", "-d", "--wait", "--wait-timeout", "300", "postgres"]);
 
-  const run = (sql: string): string =>
-    compose(
-      [
-        "exec", "-T", "-e", "PGPASSWORD=ranker", "postgres",
-        "psql", "-h", "127.0.0.1", "-U", "ranker", "-d", "ranker", "-X", "-q",
-        "-v", "ON_ERROR_STOP=1", "-tA", "-f", "-",
-      ],
-      sql,
-    ).trim();
+  const psqlArgs = [
+    "exec", "-T", "-e", "PGPASSWORD=ranker", "postgres",
+    "psql", "-h", "127.0.0.1", "-U", "ranker", "-d", "ranker", "-X", "-q",
+    "-v", "ON_ERROR_STOP=1", "-tA", "-f", "-",
+  ];
+  const run = (sql: string): string => compose(psqlArgs, sql).trim();
 
   const deadline = Date.now() + 120_000;
   for (;;) {
@@ -89,5 +88,11 @@ export async function freshDatabase(t: TestContext, options: FreshDbOptions = {}
         "exec", "-T", "-e", "PGPASSWORD=ranker", "postgres",
         "pg_dump", "-h", "127.0.0.1", "-U", "ranker", "-d", "ranker", ...args,
       ]),
+    psqlProcess: () =>
+      spawn("docker", ["compose", "-f", composeFile, "-p", project, ...psqlArgs], {
+        cwd: repoRoot,
+        env,
+        stdio: ["pipe", "pipe", "pipe"],
+      }),
   };
 }

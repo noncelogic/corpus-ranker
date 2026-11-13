@@ -15,10 +15,11 @@
 // cannot make the dump and the JSONL disagree.
 //
 // restoreBundle loads database.sql into an empty database (a fresh instance)
-// after checking every file against the manifest, then re-derives the JSONL
-// from the restored database inside the loading transaction and commits only
-// if it matches the manifest, so a successful restore is proof the corpus came
-// back whole and a failed one leaves the target empty.
+// after checking every file against the manifest. One transaction refuses a
+// non-empty target before any write, loads the dump, checks the schema version
+// and re-derives the JSONL from the restored database, and commits only if all
+// match the manifest, so a successful restore is proof the corpus came back
+// whole and a failed one leaves the target as found (empty) for a retry.
 import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
@@ -326,28 +327,48 @@ END
 $$;
 `;
 
+// Relations (tables, views, sequences, ...) outside the system schemas; an
+// empty target has none, whatever extensions its instance pre-installs.
+const TARGET_CHECK = `
+select current_database() || '|' || count(*)
+  from pg_class c join pg_namespace n on n.oid = c.relnamespace
+ where c.relkind in ('r', 'p', 'v', 'm', 'S', 'f')
+   and n.nspname not in ('pg_catalog', 'information_schema') and n.nspname not like 'pg_toast%';`;
+
 /**
  * Restore a bundle into an empty database (a fresh instance): verify the
- * files, load the dump in one transaction and, inside that transaction,
- * require the restored data to re-derive exactly the bundle's JSONL; commit
- * only then, so a failed restore leaves the target empty for a retry.
+ * files, then, in one transaction, refuse a target that already holds corpus
+ * data before writing anything, load the dump, and require the restored data
+ * to be at the manifest's schema version and to re-derive exactly the
+ * bundle's JSONL; commit only then, so a failed restore leaves the target as
+ * it was found (empty) and the same restore can run again.
  */
 export async function restoreBundle(db: PgSession, dir: string): Promise<BundleManifest> {
   const manifest = verifyBundle(dir);
-  const tables = Number(db.query("select count(*) from pg_tables where schemaname = 'public'"));
-  if (tables !== 0) throw new Error(`restore target is not empty (${tables} tables in schema public)`);
-
   const dump = readFileSync(join(dir, DATABASE_FILE), "utf8");
   const tx = new PsqlConversation(db.open());
+  // Any throw below ends the session without COMMIT (kill in finally), so the
+  // server rolls the whole transaction back, preamble role included.
+  const fail = async (message: string): Promise<never> => {
+    await tx.close("ROLLBACK;");
+    throw new Error(message);
+  };
   try {
+    const [target, relations] = (await tx.run(`BEGIN;\n${TARGET_CHECK}`)).trim().split("|");
+    if (Number(relations) !== 0) {
+      await fail(`restore target database "${target}" is not empty (${relations} relations); restore needs an empty database`);
+    }
     await tx.run(RESTORE_PREAMBLE);
-    // The dump empties search_path for the session; restore it for the check.
-    await tx.run(`BEGIN;\n${dump}\n;\nRESET search_path;`);
+    // The dump empties search_path for the session; restore it for the checks.
+    await tx.run(`${dump}\n;\nRESET search_path;`);
+    const schemaVersion = Number((await tx.run("select coalesce(max(version), 0) from schema_migrations;")).trim());
+    if (schemaVersion !== manifest.schema_version) {
+      await fail(`restored schema version ${schemaVersion} does not match the manifest's ${String(manifest.schema_version)}`);
+    }
     const { files } = parseJsonl(await tx.run(jsonlSql()));
     for (const [file, bytes] of files) {
       if (sha256(bytes) !== manifest.files[file]!.sha256) {
-        await tx.close("ROLLBACK;");
-        throw new Error(`${file}: restored database does not reproduce the bundle`);
+        await fail(`${file}: restored database does not reproduce the bundle`);
       }
     }
     await tx.close("COMMIT;");

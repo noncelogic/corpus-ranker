@@ -16,9 +16,37 @@ import { fileURLToPath } from "node:url";
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const composeFile = resolve(repoRoot, "docker-compose.yaml");
 
-const sleep = (ms: number) => new Promise((ok) => setTimeout(ok, ms));
+function assertPostgresHealthcheckGatesOnInitializedRanker(): void {
+  // `up --wait` is only as good as the healthcheck it waits on. A socket
+  // pg_isready can pass against the entrypoint's temporary init server
+  // (unix socket only, before the ranker db and vector exist, before the
+  // final restart), so that race is timing-dependent and cannot be
+  // reproduced reliably; assert the healthcheck's shape instead, and the
+  // test queries ranker once, immediately after `up --wait` returns.
+  const config = JSON.parse(
+    execFileSync("docker", ["compose", "-f", composeFile, "config", "--format", "json"], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "pipe"],
+    }),
+  ) as { services: { postgres: { healthcheck?: { test?: string[]; disable?: boolean } } } };
+  const hc = config.services.postgres.healthcheck;
+  assert.ok(hc?.test && !hc.disable, "postgres must declare a healthcheck");
+  const [kind, ...rest] = hc.test;
+  assert.ok(kind === "CMD-SHELL" || kind === "CMD", `healthcheck kind ${kind}`);
+  const cmd = rest.join(" ");
+  assert.doesNotMatch(cmd, /pg_isready/, "pg_isready only proves a server accepts connections, not init is done");
+  assert.match(cmd, /\bpsql\b/, "healthcheck must run a query");
+  assert.match(cmd, /(?:-h|--host)[ =]\s*(?:127\.0\.0\.1|localhost)\b/, "healthcheck must connect over TCP");
+  assert.match(cmd, /(?:-d|--dbname)[ =]\s*ranker\b/, "healthcheck must connect to the ranker database");
+  assert.match(cmd, /from\s+pg_extension\b/i, "healthcheck must read pg_extension");
+  assert.match(cmd, /extname\s*=\s*'vector'/, "healthcheck must look for the vector extension");
+  assert.match(cmd, /grep\s+-qx\s+vector\b/, "healthcheck must fail unless the query returns vector");
+}
 
-test("compose replica boots postgres with pgvector plus minio", { timeout: 600_000 }, async (t) => {
+test("compose up --wait returns only when the ranker database answers a TCP query and pg_extension lists vector", { timeout: 600_000 }, async (t) => {
+  assertPostgresHealthcheckGatesOnInitializedRanker();
+
   const project = `crreplica${process.pid}${Date.now() % 100000}`;
   const env = {
     ...process.env,
@@ -59,26 +87,18 @@ test("compose replica boots postgres with pgvector plus minio", { timeout: 600_0
   hostPort("postgres", 5432);
 
   // Postgres: queries go over TCP, which only the final (post-init) server
-  // listens on. Gate on a successful query against the initialized ranker
-  // database, with a deadline, rather than trusting --wait alone.
+  // listens on. `up --wait` must be the whole readiness signal: query the
+  // ranker database once, right now, with no retry and no sleep.
   const psql = (sql: string): string =>
     compose(
       "exec", "-T", "-e", "PGPASSWORD=ranker", "postgres",
       "psql", "-h", "127.0.0.1", "-U", "ranker", "-d", "ranker", "-v", "ON_ERROR_STOP=1", "-tAc", sql,
     ).trim();
-  const deadline = Date.now() + 120_000;
-  for (;;) {
-    let last: unknown;
-    try {
-      if (psql("select extname from pg_extension where extname = 'vector'") === "vector") break;
-    } catch (err) {
-      last = err;
-    }
-    if (Date.now() > deadline) {
-      throw new Error("postgres did not become ready (TCP + initialized ranker db) within 120s", { cause: last });
-    }
-    await sleep(1000);
-  }
+  assert.equal(
+    psql("select extname from pg_extension where extname = 'vector'"),
+    "vector",
+    "ranker database must answer over TCP with vector installed as soon as up --wait returns",
+  );
   assert.equal(psql("select current_database()"), "ranker");
   const extVersion = psql("select extversion from pg_extension where extname = 'vector'");
   assert.match(extVersion, /^\d+\.\d+/, "vector extension must be installed in the ranker database");

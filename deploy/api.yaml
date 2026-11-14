@@ -1,5 +1,7 @@
 # The ranker REST API. Env names are the frozen config contract read by
-# src/config.ts; tests/deploy/manifests.test.ts holds them to it.
+# src/config.ts; tests/deploy/manifests.test.ts holds them to it. The
+# database URL is the ranker_service login role's (database.yaml), never the
+# schema owner's.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -31,7 +33,7 @@ spec:
             - name: RANKER_DATABASE_URL
               valueFrom:
                 secretKeyRef:
-                  name: ranker-db-app
+                  name: ranker-db-service
                   key: uri
             - name: RANKER_S3_ENDPOINT
               value: http://ranker-minio.corpus-ranker.svc.cluster.local:9000

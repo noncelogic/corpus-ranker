@@ -21,6 +21,18 @@ export interface FreshDb {
   pgDump(args: readonly string[]): string;
   /** Start a long-lived psql as the migration owner, reading SQL from stdin (flags as psql). */
   psqlProcess(): ChildProcessWithoutNullStreams;
+  /** Run SQL as a real login (user/password) against any database; output or throws with stderr. */
+  psqlLogin(login: Login, sql: string): string;
+  /** Run a POSIX shell script inside the Postgres container with extra env; returns stdout. */
+  sh(script: string, env?: Readonly<Record<string, string>>): string;
+  /** Write a file inside the Postgres container (parent directories are created). */
+  writeFile(path: string, content: string): void;
+}
+
+export interface Login {
+  user: string;
+  password: string;
+  database: string;
 }
 
 export interface FreshDbOptions {
@@ -88,6 +100,19 @@ export async function freshDatabase(t: TestContext, options: FreshDbOptions = {}
         "exec", "-T", "-e", "PGPASSWORD=ranker", "postgres",
         "pg_dump", "-h", "127.0.0.1", "-U", "ranker", "-d", "ranker", ...args,
       ]),
+    psqlLogin: (login, sql) =>
+      compose([
+        "exec", "-T", "-e", `PGPASSWORD=${login.password}`, "postgres",
+        "psql", "-h", "127.0.0.1", "-U", login.user, "-d", login.database, "-X", "-q",
+        "-v", "ON_ERROR_STOP=1", "-tA", "-f", "-",
+      ], sql).trim(),
+    sh: (script, extraEnv = {}) =>
+      compose([
+        "exec", "-T", ...Object.entries(extraEnv).flatMap(([k, v]) => ["-e", `${k}=${v}`]), "postgres",
+        "sh", "-c", script,
+      ]),
+    writeFile: (path, content) =>
+      void compose(["exec", "-T", "postgres", "sh", "-c", 'mkdir -p "$(dirname "$1")" && cat > "$1"', "sh", path], content),
     psqlProcess: () =>
       spawn("docker", ["compose", "-f", composeFile, "-p", project, ...psqlArgs], {
         cwd: repoRoot,

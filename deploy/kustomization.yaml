@@ -1,6 +1,6 @@
 # Corpus Ranker on aks-obs-01 (TECH-STACK §10): one namespace, the ranker's
-# own CNPG Postgres cluster (pgvector) and MinIO bucket, the API, and
-# ExternalSecrets resolved from the estate OpenBao ClusterSecretStore.
+# own CNPG Postgres cluster (pgvector) with its PreSync migration Job, the
+# MinIO bucket, the API, and ExternalSecrets resolved from the estate OpenBao ClusterSecretStore.
 #
 # Manifests only. No CI step applies these; rollout is estate-side GitOps
 # (Argo). Render locally with:  kustomize build deploy/
@@ -16,8 +16,23 @@ resources:
   - namespace.yaml
   - externalsecrets.yaml
   - database.yaml
+  - migrate-job.yaml
   - minio.yaml
   - api.yaml
+# CNPG bootstrap SQL and the migration script, kept as plain files so the
+# schema tests run exactly what deploys. Fixed names: the Cluster refers to
+# its ConfigMap from a CRD field kustomize cannot rewrite.
+configMapGenerator:
+  - name: ranker-db-bootstrap
+    files:
+      - db/bootstrap.sql
+    options:
+      disableNameSuffixHash: true
+  - name: ranker-db-migrate
+    files:
+      - db/migrate.sh
+    options:
+      disableNameSuffixHash: true
 images:
   # .github/workflows/publish.yml publishes ghcr.io/noncelogic/corpus-ranker:sha-<commit>
   # for every merge. Estate-side GitOps pins the tag (or digest) it rolls out here.

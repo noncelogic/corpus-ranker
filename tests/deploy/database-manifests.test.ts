@@ -147,3 +147,48 @@ test("the rendered overlay declares the ranker CNPG cluster with separate migrat
   // The API itself never runs migrations and never holds DDL rights.
   assert.equal(findObject("Deployment", "ranker-api").spec.template.spec.initContainers, undefined);
 });
+
+// Go's url.QueryEscape, which text/template's `urlquery` calls: unreserved
+// bytes pass through, a space becomes "+", everything else is %XX-escaped.
+function goQueryEscape(s: string): string {
+  let out = "";
+  for (const byte of new TextEncoder().encode(s)) {
+    const ch = String.fromCharCode(byte);
+    if (/[A-Za-z0-9\-_.~]/.test(ch)) out += ch;
+    else if (ch === " ") out += "+";
+    else out += "%" + byte.toString(16).toUpperCase().padStart(2, "0");
+  }
+  return out;
+}
+
+/** Evaluates the ESO template's `{{ .password | ... }}` pipeline for the functions it may use. */
+function renderPasswordPipeline(template: string, password: string): string {
+  const m = /\{\{\s*\.password((?:\s*\|[^}]*)?)\}\}/.exec(template);
+  assert.ok(m, `no .password pipeline in ${template}`);
+  let value = password;
+  for (const stage of m[1]!.split("|").map((s) => s.trim()).filter(Boolean)) {
+    const replace = /^replace\s+"([^"]*)"\s+"([^"]*)"$/.exec(stage);
+    if (stage === "urlquery") value = goQueryEscape(value);
+    else if (replace) value = value.split(replace[1]!).join(replace[2]!);
+    else assert.fail(`unhandled template function in password pipeline: ${stage}`);
+  }
+  return template.slice(0, m.index) + value + template.slice(m.index + m[0].length);
+}
+
+test("the service connection URI percent-encodes the password so libpq decodes it unchanged", () => {
+  // libpq percent-decodes URI userinfo and does not treat "+" as a space, so
+  // query encoding alone ("a b" -> "a+b") would hand Postgres the wrong password.
+  const docs = parseYamlDocs(readFileSync(resolve(deployDir, "externalsecrets.yaml"), "utf8")) as K8sObject[];
+  const es = docs.find((o) => o?.kind === "ExternalSecret" && o.metadata.name === "ranker-db-service");
+  assert.ok(es, "no ranker-db-service ExternalSecret");
+  const template: string = es.spec.target.template.data.uri;
+  for (const password of ["a b", "a+b", "p@ss:w/rd?#%&=", "ünï cødé", "plain"]) {
+    const uri = renderPasswordPipeline(template, password);
+    const userinfo = /^postgresql:\/\/([^@/]*)@/.exec(uri)?.[1];
+    assert.ok(userinfo, `rendered URI has no userinfo: ${uri}`);
+    assert.doesNotMatch(userinfo, /[ +@/?#]/, `userinfo must be fully percent-encoded: ${userinfo}`);
+    const [user, encoded] = userinfo.split(":");
+    assert.equal(user, SERVICE);
+    assert.equal(decodeURIComponent(encoded!), password, `password ${JSON.stringify(password)} round-trips`);
+  }
+});

@@ -120,8 +120,9 @@ test("kustomize build renders and the Deployment env names match the frozen conf
     assert.ok(read.has(name), `Deployment sets ${name}, which src/config.ts does not read`);
   }
 
-  // Wiring: database URL from the CNPG app secret, object store at MinIO.
-  assert.match(deployment.text, /name: RANKER_DATABASE_URL\n\s+valueFrom:\n\s+secretKeyRef:\n\s+(?:key: uri\n\s+name: ranker-db-app|name: ranker-db-app\n\s+key: uri)/);
+  // Wiring: database URL from the service role's secret (database.yaml),
+  // object store at MinIO.
+  assert.match(deployment.text, /name: RANKER_DATABASE_URL\n\s+valueFrom:\n\s+secretKeyRef:\n\s+(?:key: uri\n\s+name: ranker-db-service|name: ranker-db-service\n\s+key: uri)/);
   assert.match(deployment.text, /name: RANKER_S3_ENDPOINT\n\s+value: http:\/\/ranker-minio[.:]/);
   assert.match(deployment.text, /name: RANKER_S3_BUCKET\n\s+value: ranker-originals/);
   assert.match(deployment.text, /image: ghcr\.io\/noncelogic\/corpus-ranker[:@]/);

@@ -19,6 +19,9 @@ COPY package.json ./
 COPY --from=build /app/dist ./dist
 # dist/contracts/index.js resolves the contract documents from /app/contracts.
 COPY contracts ./contracts
+# The merged schema migrations, applied by the deploy/ PreSync Job (copied out
+# of this image, so schema and service always ship together).
+COPY db/migrations ./db/migrations
 USER node
 EXPOSE 8080
 CMD ["node", "dist/server.js"]

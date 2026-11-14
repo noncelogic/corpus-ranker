@@ -1,0 +1,109 @@
+# Applies the merged schema migrations before the service rolls out: an
+# Argo CD PreSync hook, so every sync migrates first and a failed migration
+# stops the sync before the API changes.
+#
+# The migrations come from the API image itself (db/migrations, same tag as
+# the Deployment via kustomization `images:`), so the schema applied always
+# matches the service about to start. deploy/db/migrate.sh applies them with
+# psql from the CNPG Postgres image, logged in as ranker_migrator, the only
+# credentials this Job holds.
+#
+# First install: PreSync hooks run before the sync creates the Cluster, so the
+# very first sync of an empty namespace must create ranker-db before this hook
+# can succeed (e.g. sync the Cluster and its ExternalSecrets first); the
+# script waits up to MIGRATE_WAIT_SECONDS for the database.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ranker-db-migrate
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 1200
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ranker-db-migrate
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: migrations
+          image: ghcr.io/noncelogic/corpus-ranker
+          command: ["sh", "-c", "cp /app/db/migrations/*.sql /migrations/"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          volumeMounts:
+            - name: migrations
+              mountPath: /migrations
+      containers:
+        - name: migrate
+          image: ghcr.io/cloudnative-pg/postgresql:17.7-standard-trixie@sha256:e079dae5253fa6ed26fc65fda06d515af764dbec392dd4b46b17ab11eebd8131
+          command: ["sh", "/scripts/migrate.sh", "/migrations"]
+          env:
+            - name: PGHOST
+              value: ranker-db-rw
+            - name: PGPORT
+              value: "5432"
+            - name: PGDATABASE
+              value: ranker
+            - name: PGSSLMODE
+              value: require
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef:
+                  name: ranker-db-migrator
+                  key: username
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ranker-db-migrator
+                  key: password
+            - name: HOME
+              value: /tmp
+            - name: MIGRATE_WAIT_SECONDS
+              value: "600"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          volumeMounts:
+            - name: migrations
+              mountPath: /migrations
+              readOnly: true
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: migrations
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+        - name: scripts
+          configMap:
+            name: ranker-db-migrate

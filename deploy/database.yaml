@@ -3,8 +3,15 @@
 # operator is installed here). The CNPG "standard" image ships pgvector; the
 # extension is created in the `ranker` database at bootstrap.
 #
-# CNPG generates the app credentials secret `ranker-db-app` (key `uri` is the
-# full connection string) and the read-write Service `ranker-db-rw`.
+# Role ownership (deploy/db/bootstrap.sql has the details):
+#   ranker_migrator  database owner; owns the schema and every object the
+#                    migrations create. Only the ranker-db-migrate PreSync Job
+#                    (migrate-job.yaml) logs in as it.
+#   ranker_service   the API's login role and the only application writer:
+#                    a member of ranker_app, whose grants (db/migrations) make
+#                    score events append-only (no UPDATE or DELETE).
+# Both passwords live in OpenBao (externalsecrets.yaml). No superuser secret
+# is exposed. CNPG serves the read-write Service `ranker-db-rw`.
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
@@ -13,12 +20,35 @@ spec:
   instances: 2
   imageName: ghcr.io/cloudnative-pg/postgresql:17.7-standard-trixie@sha256:e079dae5253fa6ed26fc65fda06d515af764dbec392dd4b46b17ab11eebd8131
   primaryUpdateStrategy: unsupervised
+  enableSuperuserAccess: false
   bootstrap:
     initdb:
       database: ranker
-      owner: ranker
+      owner: ranker_migrator
+      secret:
+        name: ranker-db-migrator
       postInitApplicationSQL:
         - CREATE EXTENSION IF NOT EXISTS vector
+      postInitApplicationSQLRefs:
+        configMapRefs:
+          - name: ranker-db-bootstrap
+            key: bootstrap.sql
+  managed:
+    roles:
+      - name: ranker_service
+        ensure: present
+        comment: Corpus Ranker API (application writer, via ranker_app)
+        login: true
+        inherit: true
+        superuser: false
+        createdb: false
+        createrole: false
+        replication: false
+        bypassrls: false
+        inRoles:
+          - ranker_app
+        passwordSecret:
+          name: ranker-db-service
   storage:
     size: 20Gi
     storageClass: managed-csi-premium

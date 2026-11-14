@@ -1,0 +1,96 @@
+# Checks the in-cluster generated database credentials against CNPG on every
+# Argo sync: an Argo CD PostSync hook that, once every resource is synced and
+# healthy, logs in to the ranker database through the CNPG read-write Service
+# with each generated role secret (externalsecrets.yaml: ranker-db-migrator,
+# ranker-db-service). deploy/db/dbcheck.sh exits non-zero when a secret is
+# missing or a login is refused, which fails the Job and so the sync.
+#
+# The Secrets are mounted as optional volumes so a missing one reaches the
+# script (and fails it with a clear message) instead of leaving the pod stuck
+# in ContainerCreating. The Job only logs in and runs `select current_user`.
+#
+# PostSync runs after every Sync-phase wave, so the wave below only orders it
+# among PostSync hooks (tests/deploy/sync-waves.test.ts).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ranker-db-check
+  annotations:
+    argocd.argoproj.io/hook: PostSync
+    argocd.argoproj.io/sync-wave: "0"
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ranker-db-check
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: dbcheck
+          image: ghcr.io/cloudnative-pg/postgresql:17.7-standard-trixie@sha256:e079dae5253fa6ed26fc65fda06d515af764dbec392dd4b46b17ab11eebd8131
+          command: ["sh", "/scripts/dbcheck.sh"]
+          args: ["ranker-db-migrator", "ranker-db-service"]
+          env:
+            - name: PGHOST
+              value: ranker-db-rw
+            - name: PGPORT
+              value: "5432"
+            - name: PGDATABASE
+              value: ranker
+            - name: PGSSLMODE
+              value: require
+            - name: PGCONNECT_TIMEOUT
+              value: "10"
+            - name: HOME
+              value: /tmp
+            - name: DBCHECK_SECRETS_DIR
+              value: /secrets
+            - name: DBCHECK_WAIT_SECONDS
+              value: "60"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          volumeMounts:
+            - name: ranker-db-migrator
+              mountPath: /secrets/ranker-db-migrator
+              readOnly: true
+            - name: ranker-db-service
+              mountPath: /secrets/ranker-db-service
+              readOnly: true
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: ranker-db-migrator
+          secret:
+            secretName: ranker-db-migrator
+            optional: true
+        - name: ranker-db-service
+          secret:
+            secretName: ranker-db-service
+            optional: true
+        - name: scripts
+          configMap:
+            name: ranker-db-check
+        - name: tmp
+          emptyDir: {}

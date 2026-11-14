@@ -6,7 +6,8 @@
 # Role ownership (deploy/db/bootstrap.sql has the details):
 #   ranker_migrator  database owner; owns the schema and every object the
 #                    migrations create. Only the ranker-db-migrate Sync-hook Job
-#                    (migrate-job.yaml) logs in as it.
+#                    (migrate-job.yaml) works as it; the ranker-db-check
+#                    PostSync hook (dbcheck-job.yaml) only checks its login.
 #   ranker_service   the API's login role and the only application writer:
 #                    a member of ranker_app, whose grants (db/migrations) make
 #                    score events append-only (no UPDATE or DELETE).

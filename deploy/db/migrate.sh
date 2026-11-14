@@ -1,7 +1,7 @@
 #!/bin/sh
 # Applies the merged schema migrations (db/migrations/NNNN_name.sql) in
 # version order, each in one transaction, skipping versions already recorded
-# in schema_migrations. Run by the ranker-db-migrate PreSync Job, logged in as
+# in schema_migrations. Run by the ranker-db-migrate Sync-hook Job, logged in as
 # the migrator (connection from the standard PG* environment variables).
 #
 # Usage: migrate.sh MIGRATIONS_DIR

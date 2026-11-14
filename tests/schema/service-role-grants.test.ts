@@ -4,7 +4,7 @@
 //   - initdb: database `ranker_estate` owned by the (non-superuser) migrator;
 //   - postInitApplicationSQL + deploy/db/bootstrap.sql, as superuser;
 //   - the managed service login role, a member of ranker_app;
-// then deploy/db/migrate.sh (the PreSync Job's script) applies the merged
+// then deploy/db/migrate.sh (the migration Job's script) applies the merged
 // migrations logged in as the migrator, and the service logs in for real.
 import { test } from "node:test";
 import assert from "node:assert/strict";

@@ -3,7 +3,8 @@ name: publish
 # Builds the ranker image once per merge to main and publishes it to GHCR as
 # ghcr.io/noncelogic/corpus-ranker:sha-<commit>.
 #
-# Runs on the owner's self-hosted runners, which hold estate credentials
+# Runs on the owner's self-hosted runners (the passband-ci ARC scale set,
+# labelled [passband-ci, aks, self-hosted]), which hold estate credentials
 # (docs/EXTERNAL-REVIEW.md §1). It is therefore triggered ONLY by pushes to
 # main — never by pull_request, pull_request_target or any event external
 # code can raise — and authenticates with the repository's own GITHUB_TOKEN,
@@ -25,7 +26,7 @@ permissions: {}
 
 jobs:
   image:
-    runs-on: [self-hosted, linux]
+    runs-on: [self-hosted, passband-ci]
     timeout-minutes: 20
     permissions:
       contents: read

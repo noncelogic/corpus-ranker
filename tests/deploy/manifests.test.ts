@@ -152,6 +152,9 @@ test("manifests target namespace corpus-ranker with CNPG, MinIO, ExternalSecrets
   const externalSecrets = docs.filter((d) => d.kind === "ExternalSecret");
   assert.ok(externalSecrets.length > 0, "no ExternalSecret rendered");
   for (const es of externalSecrets) {
+    // Store-backed secrets come from OpenBao; the database passwords are
+    // generated in-cluster instead (tests/deploy/db-passwords.test.ts).
+    if (/^\s+generatorRef:$/m.test(es.text) && !/secretStoreRef:/.test(es.text)) continue;
     assert.match(es.text, /kind: ClusterSecretStore\n\s+name: openbao$/m, `${es.name} does not use the OpenBao ClusterSecretStore`);
   }
 

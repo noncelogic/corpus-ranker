@@ -41,7 +41,7 @@ const secretRef = (container: { env?: EnvVar[] }, name: string): { name: string;
 function externalSecretFor(secretName: string): K8sObject {
   const es = renderObjects().find((o) => o.kind === "ExternalSecret" && (o.spec?.target?.name ?? o.metadata.name) === secretName);
   assert.ok(es, `no ExternalSecret materialises Secret ${secretName}`);
-  assert.deepEqual(es.spec.secretStoreRef, { kind: "ClusterSecretStore", name: "openbao" });
+  // The passwords are generated in-cluster (tests/deploy/db-passwords.test.ts).
   return es;
 }
 
@@ -139,13 +139,13 @@ test("the rendered overlay declares the ranker CNPG cluster with separate migrat
   assert.deepEqual(service.inRoles, [APP_GRANT_ROLE]);
   assert.deepEqual(service.passwordSecret, { name: "ranker-db-service" });
 
-  // Both credentials live in OpenBao and are surfaced as basic-auth Secrets
-  // whose username is the role's name.
+  // Both credentials are surfaced as basic-auth Secrets whose username is the
+  // role's name.
   for (const [secret, role] of [["ranker-db-migrator", MIGRATOR], ["ranker-db-service", SERVICE]] as const) {
     const tmpl = externalSecretFor(secret).spec.target.template;
     assert.equal(tmpl?.type, "kubernetes.io/basic-auth", `${secret} must be a basic-auth Secret for CNPG`);
     assert.equal(tmpl.data.username, role, `${secret} username`);
-    assert.match(tmpl.data.password, /\{\{.*\}\}/, `${secret} password comes from OpenBao`);
+    assert.match(tmpl.data.password, /\{\{.*\}\}/, `${secret} password is templated from the generated value`);
   }
   const serviceUri: string = externalSecretFor("ranker-db-service").spec.target.template.data.uri;
   assert.match(serviceUri, new RegExp(`^postgresql://${SERVICE}:\\{\\{.*\\}\\}@ranker-db-rw\\.corpus-ranker\\.svc(?:\\.cluster\\.local)?:5432/ranker\\b`));

@@ -1,6 +1,7 @@
 # Corpus Ranker on aks-obs-01 (TECH-STACK §10): one namespace, the ranker's
 # own CNPG Postgres cluster (pgvector) with its PreSync migration Job, the
-# MinIO bucket, the API, and ExternalSecrets resolved from the estate OpenBao ClusterSecretStore.
+# MinIO bucket, the API, and ExternalSecrets: API keys and MinIO credentials
+# from the estate OpenBao ClusterSecretStore, database passwords generated in-cluster.
 #
 # Manifests only. No CI step applies these; rollout is estate-side GitOps
 # (Argo). Render locally with:  kustomize build deploy/

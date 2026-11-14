@@ -10,8 +10,8 @@
 #   ranker_service   the API's login role and the only application writer:
 #                    a member of ranker_app, whose grants (db/migrations) make
 #                    score events append-only (no UPDATE or DELETE).
-# Both passwords live in OpenBao (externalsecrets.yaml). No superuser secret
-# is exposed. CNPG serves the read-write Service `ranker-db-rw`.
+# Both passwords are generated once in-cluster by an External Secrets
+# Password generator (externalsecrets.yaml). No superuser secret is exposed. CNPG serves the read-write Service `ranker-db-rw`.
 apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:

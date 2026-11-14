@@ -19,7 +19,7 @@ resources:
   - minio.yaml
   - api.yaml
 images:
-  # The CI image job publishes ghcr.io/noncelogic/corpus-ranker:sha-<commit>
+  # .github/workflows/publish.yml publishes ghcr.io/noncelogic/corpus-ranker:sha-<commit>
   # and :main. Estate-side GitOps pins the tag (or digest) it rolls out here.
   - name: ghcr.io/noncelogic/corpus-ranker
     newTag: main

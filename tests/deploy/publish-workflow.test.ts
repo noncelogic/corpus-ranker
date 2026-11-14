@@ -77,7 +77,7 @@ function jobs(yaml: string): Map<string, string> {
 
 const publish = stripComments(readFileSync(resolve(workflowsDir, "publish.yml"), "utf8"));
 
-test("the publish workflow triggers on push to main, runs on self-hosted runners and pushes a SHA-tagged image to ghcr.io/noncelogic/corpus-ranker with packages write permission only", () => {
+test("the publish workflow triggers on push to main, runs on the passband-ci self-hosted runners and pushes a SHA-tagged image to ghcr.io/noncelogic/corpus-ranker with packages write permission only", () => {
   // Trigger: push to main, and nothing else (in particular, never a PR).
   const on = block(publish, "on", 0);
   assert.ok(on.length > 0, "publish.yml has an `on:` block");
@@ -101,6 +101,19 @@ test("the publish workflow triggers on push to main, runs on self-hosted runners
   const jobYaml = `job:\n${job}`;
 
   assert.match(job, /^ {4}runs-on:\s*\[\s*self-hosted\b[^\]]*\]\s*$/m, "job runs on self-hosted runners");
+  // Placement: every requested label must be one the owner's runner carries,
+  // or the job queues forever. The online self-hosted runner is the
+  // passband-ci ARC scale set, labelled [passband-ci, aks, self-hosted]; it
+  // has no `linux` label (publish run 43556512729 sat queued on that).
+  const RUNNER_LABELS = ["passband-ci", "aks", "self-hosted"];
+  const runsOn = /^ {4}runs-on:\s*\[([^\]]*)\]/m
+    .exec(job)?.[1]
+    ?.split(",")
+    .map((label) => label.trim());
+  assert.ok(runsOn && runsOn.length > 0, "runs-on lists labels");
+  const missing = runsOn.filter((label) => !RUNNER_LABELS.includes(label));
+  assert.deepEqual(missing, [], "runs-on asks only for labels the passband-ci runner carries");
+  assert.ok(runsOn.includes("passband-ci"), "runs-on names the passband-ci scale set");
 
   const perms = mapEntries(block(jobYaml, "permissions", 4));
   assert.deepEqual(perms, { contents: "read", packages: "write" });

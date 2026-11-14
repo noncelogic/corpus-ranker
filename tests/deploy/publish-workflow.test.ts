@@ -117,6 +117,15 @@ test("the publish workflow triggers on push to main, runs on self-hosted runners
   assert.equal(publish.match(/docker build\b/g)?.length, 1, "one docker build");
   assert.match(publish, /-t "\$\{IMAGE\}:sha-\$\{GITHUB_SHA\}"/);
   assert.match(publish, /docker push "\$\{IMAGE\}:sha-\$\{GITHUB_SHA\}"/);
+
+  // Once per merge: no concurrency group anywhere. A group keeps at most one
+  // pending run, so with A running and B pending a merge C cancels B even
+  // with `cancel-in-progress: false`, and B's SHA would go unpublished.
+  assert.doesNotMatch(publish, /^\s*concurrency:/m, "no concurrency group may drop a queued merge's run");
+  // Runs may therefore overlap; they must push only their own immutable SHA
+  // tag, never a moving tag that an older run could overwrite last.
+  const pushes = [...publish.matchAll(/docker push\s+(\S+)/g)].map((m) => m[1]);
+  assert.deepEqual(pushes, ['"${IMAGE}:sha-${GITHUB_SHA}"'], "only the SHA tag is pushed");
 });
 
 test("ci.yml no longer publishes, so each merge to main pushes the image exactly once", () => {

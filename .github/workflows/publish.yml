@@ -1,7 +1,7 @@
 name: publish
 
 # Builds the ranker image once per merge to main and publishes it to GHCR as
-# ghcr.io/noncelogic/corpus-ranker:sha-<commit> (and :main).
+# ghcr.io/noncelogic/corpus-ranker:sha-<commit>.
 #
 # Runs on the owner's self-hosted runners, which hold estate credentials
 # (docs/EXTERNAL-REVIEW.md §1). It is therefore triggered ONLY by pushes to
@@ -16,9 +16,12 @@ on:
 
 permissions: {}
 
-concurrency:
-  group: publish-${{ github.ref }}
-  cancel-in-progress: false
+# Deliberately no `concurrency:` group. A group holds at most one pending
+# run: with A running and B pending, a third merge C cancels B even under
+# `cancel-in-progress: false`, so B's SHA would never be published. Each
+# run pushes only its own immutable sha-<commit> tag, so runs for different
+# merges never contend and may safely overlap; no moving tag (e.g. :main) is
+# pushed, as overlapping runs could leave it pointing at an older commit.
 
 jobs:
   image:
@@ -38,7 +41,7 @@ jobs:
           docker build \
             --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
             --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
-            -t "${IMAGE}:sha-${GITHUB_SHA}" -t "${IMAGE}:main" .
+            -t "${IMAGE}:sha-${GITHUB_SHA}" .
       - name: Publish
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -50,4 +53,3 @@ jobs:
           trap 'docker logout ghcr.io >/dev/null 2>&1 || true; rm -rf "$DOCKER_CONFIG"' EXIT
           printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
           docker push "${IMAGE}:sha-${GITHUB_SHA}"
-          docker push "${IMAGE}:main"

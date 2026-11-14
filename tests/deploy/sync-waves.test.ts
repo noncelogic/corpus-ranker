@@ -145,7 +145,10 @@ test("the waves follow the deployment order: namespace, secrets and config, data
     "secret/config prerequisites",
   );
   const db = waveOf(isCnpg, "CNPG resources");
-  const workloads = waveOf((o) => ["Deployment", "StatefulSet", "Job", "CronJob"].includes(o.kind), "workloads");
+  // PostSync hooks (the ranker-db-check Job) run after every Sync-phase wave
+  // by construction, so only Sync-phase workloads are ordered by wave here.
+  const isPostSync = (o: K8sObject): boolean => position(o)[0] === PHASES.indexOf("PostSync");
+  const workloads = waveOf((o) => ["Deployment", "StatefulSet", "Job", "CronJob"].includes(o.kind) && !isPostSync(o), "workloads");
 
   assert.ok(Math.max(...ns) < Math.min(...prereqs), "the namespace comes first");
   assert.ok(Math.max(...prereqs) < Math.min(...db), "secrets and ConfigMaps precede the database");

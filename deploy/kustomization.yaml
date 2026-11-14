@@ -15,6 +15,9 @@
 #   3  the CNPG Cluster (ranker-db)
 #   4  the migration Job (a Sync hook; migrate-job.yaml)
 #   5  the ranker workloads: MinIO and the API
+# then, after every wave is synced and healthy, the PostSync hook Job
+# ranker-db-check (dbcheck-job.yaml) logs in with each generated database
+# role secret and fails the sync if a secret is missing or a login is refused.
 # tests/deploy/sync-waves.test.ts holds every reference to this order.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
@@ -30,6 +33,7 @@ resources:
   - migrate-job.yaml
   - minio.yaml
   - api.yaml
+  - dbcheck-job.yaml
 # CNPG bootstrap SQL and the migration script, kept as plain files so the
 # schema tests run exactly what deploys. Fixed names: the Cluster refers to
 # its ConfigMap from a CRD field kustomize cannot rewrite.
@@ -44,6 +48,13 @@ configMapGenerator:
   - name: ranker-db-migrate
     files:
       - db/migrate.sh
+    options:
+      disableNameSuffixHash: true
+      annotations:
+        argocd.argoproj.io/sync-wave: "2"
+  - name: ranker-db-check
+    files:
+      - db/dbcheck.sh
     options:
       disableNameSuffixHash: true
       annotations:

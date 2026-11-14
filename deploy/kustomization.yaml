@@ -1,11 +1,21 @@
 # Corpus Ranker on aks-obs-01 (TECH-STACK §10): one namespace, the ranker's
-# own CNPG Postgres cluster (pgvector) with its PreSync migration Job, the
+# own CNPG Postgres cluster (pgvector) with its migration Job, the
 # MinIO bucket, the API, and ExternalSecrets: API keys and MinIO credentials
 # from the estate OpenBao ClusterSecretStore, database passwords generated in-cluster.
 #
 # Manifests only. No CI step applies these; rollout is estate-side GitOps
 # (Argo). Render locally with:  kustomize build deploy/
 # No Ingress: the API is reachable estate-internally via its ClusterIP Service.
+#
+# Argo CD sync waves (argocd.argoproj.io/sync-wave) order one full sync of an
+# empty namespace so every prerequisite exists before its consumer:
+#   0  the Namespace
+#   1  the Password generator
+#   2  the ExternalSecrets (one draws on the generator) and ConfigMaps
+#   3  the CNPG Cluster (ranker-db)
+#   4  the migration Job (a Sync hook; migrate-job.yaml)
+#   5  the ranker workloads: MinIO and the API
+# tests/deploy/sync-waves.test.ts holds every reference to this order.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 namespace: corpus-ranker
@@ -29,11 +39,15 @@ configMapGenerator:
       - db/bootstrap.sql
     options:
       disableNameSuffixHash: true
+      annotations:
+        argocd.argoproj.io/sync-wave: "2"
   - name: ranker-db-migrate
     files:
       - db/migrate.sh
     options:
       disableNameSuffixHash: true
+      annotations:
+        argocd.argoproj.io/sync-wave: "2"
 images:
   # .github/workflows/publish.yml publishes ghcr.io/noncelogic/corpus-ranker:sha-<commit>
   # for every merge. Estate-side GitOps pins the tag (or digest) it rolls out here.

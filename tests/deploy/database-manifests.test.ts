@@ -5,8 +5,9 @@
 //   - ranker_service: the service's login role, a member of the ranker_app
 //     grant role (db/migrations), so it can write but never UPDATE or DELETE
 //     score events.
-// An Argo CD PreSync Job applies the merged migrations (db/migrations, baked
-// into the API image) as the migrator before the service is rolled out.
+// An Argo CD Sync-hook Job (wave 4, tests/deploy/sync-waves.test.ts) applies
+// the merged migrations (db/migrations, baked into the API image) as the
+// migrator before the service is rolled out.
 //
 // The live-Postgres half of this contract is tests/schema/service-role-grants.test.ts.
 import { test } from "node:test";
@@ -156,9 +157,9 @@ test("the rendered overlay declares the ranker CNPG cluster with separate migrat
   const apiSecrets = JSON.stringify(findObject("Deployment", "ranker-api"));
   assert.doesNotMatch(apiSecrets, /ranker-db-migrator|ranker-db-app|ranker-db-superuser/, "the API must not see owner or superuser credentials");
 
-  // --- The migration Job: an Argo CD PreSync hook, run as the migrator.
+  // --- The migration Job: an Argo CD Sync hook, run as the migrator.
   const job = findObject("Job", "ranker-db-migrate");
-  assert.equal(job.metadata.annotations?.["argocd.argoproj.io/hook"], "PreSync");
+  assert.equal(job.metadata.annotations?.["argocd.argoproj.io/hook"], "Sync");
   assert.equal(job.metadata.annotations?.["argocd.argoproj.io/hook-delete-policy"], "BeforeHookCreation");
   const pod = job.spec.template.spec;
   assert.equal(pod.restartPolicy, "Never");

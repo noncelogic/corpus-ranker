@@ -1,6 +1,7 @@
 # Applies the merged schema migrations before the service rolls out: an
-# Argo CD PreSync hook, so every sync migrates first and a failed migration
-# stops the sync before the API changes.
+# Argo CD Sync hook in wave 4, after the database (wave 3) and before the
+# ranker workloads (wave 5). Every sync migrates before the API changes, and
+# a failed migration stops the sync there.
 #
 # The migrations come from the API image itself (db/migrations, same tag as
 # the Deployment via kustomization `images:`), so the schema applied always
@@ -8,16 +9,18 @@
 # psql from the CNPG Postgres image, logged in as ranker_migrator, the only
 # credentials this Job holds.
 #
-# First install: PreSync hooks run before the sync creates the Cluster, so the
-# very first sync of an empty namespace must create ranker-db before this hook
-# can succeed (e.g. sync the Cluster and its ExternalSecrets first); the
-# script waits up to MIGRATE_WAIT_SECONDS for the database.
+# Not a PreSync hook: PreSync runs before any wave, so on the first sync of an
+# empty namespace it would wait for a Cluster that the sync has not created
+# yet. As a wave-4 Sync hook it starts once ranker-db and its Secrets exist;
+# the script still waits up to MIGRATE_WAIT_SECONDS for the database to accept
+# connections.
 apiVersion: batch/v1
 kind: Job
 metadata:
   name: ranker-db-migrate
   annotations:
-    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/sync-wave: "4"
     argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
 spec:
   backoffLimit: 2

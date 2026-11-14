@@ -84,7 +84,7 @@ function splitFlow(body: string): string[] {
 
 function scalar(raw: string): Yaml {
   const s = stripComment(raw.trim());
-  if (s.startsWith('"')) return JSON.parse(s) as string;
+  if (s.startsWith('"')) return JSON.parse(s.replace(/\n/g, "\\n")) as string;
   if (s.startsWith("'")) return s.slice(1, -1).replace(/''/g, "'");
   if (s.startsWith("[")) return splitFlow(s.slice(1, -1)).map(scalar);
   if (s.startsWith("{")) {
@@ -177,7 +177,7 @@ class Reader {
   private blockOrScalar(rest: string, parentIndent: number): Yaml {
     const head = stripComment(rest);
     const m = /^([|>])([+-]?)$/.exec(head);
-    if (!m) return scalar(rest);
+    if (!m) return scalar(this.foldContinuation(rest, parentIndent));
     const body: string[] = [];
     let blockIndent: number | undefined;
     while (this.i < this.lines.length) {
@@ -195,6 +195,34 @@ class Reader {
     while (body.length > 0 && body[body.length - 1] === "") body.pop();
     const text = m[1] === ">" ? body.join(" ") : body.join("\n");
     return m[2] === "-" ? text : text + "\n";
+  }
+
+  /**
+   * Fold a multi-line flow scalar (plain or quoted) whose continuation lines
+   * are indented deeper than `parentIndent`, as kustomize emits long values:
+   * line breaks become one space, an empty line becomes "\n", and a
+   * double-quoted line ending in an escaped break (`\`) joins with nothing.
+   */
+  private foldContinuation(first: string, parentIndent: number): string {
+    let text = first.trimEnd();
+    let pendingNewlines = 0;
+    let j = this.i;
+    while (j < this.lines.length) {
+      const l = this.lines[j]!;
+      if (l.raw.trim() === "") {
+        pendingNewlines++;
+        j++;
+        continue;
+      }
+      if (l.indent <= parentIndent || l.text.startsWith("#")) break;
+      if (pendingNewlines > 0) text += "\n".repeat(pendingNewlines);
+      else if (text.startsWith('"') && /(^|[^\\])(\\\\)*\\$/.test(text)) text = text.slice(0, -1);
+      else text += " ";
+      text += l.text;
+      pendingNewlines = 0;
+      this.i = ++j;
+    }
+    return text;
   }
 }
 

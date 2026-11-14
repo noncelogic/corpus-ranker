@@ -54,6 +54,51 @@ test("the YAML reader used by these tests parses the source manifests", () => {
   assert.deepEqual(docs, [{ a: [{ b: 1, c: ["x", "y"] }, "l1\nl2\n"], d: { e: "f" } }, { k: "it's" }]);
 });
 
+test("the YAML reader folds multi-line scalars as kustomize wraps them at 80 columns", () => {
+  // kustomize (go-yaml v3) wraps long scalars onto more-indented continuation
+  // lines; the reader must fold them back rather than drop the rest of the map.
+  const rendered = [
+    "spec:",
+    "  target:",
+    "    template:",
+    "      data:",
+    "        password: '{{ .password }}'",
+    "        uri: postgresql://ranker_service:{{ .password | urlquery | replace \"+\" \"%20\"",
+    "          }}@ranker-db-rw.corpus-ranker.svc:5432/ranker?sslmode=require",
+    "        username: ranker_service",
+    "      type: kubernetes.io/basic-auth",
+    "  args:",
+    "  - a long",
+    "    plain item",
+    "  - \"a quoted",
+    "    item with es\\",
+    "    cape\"",
+    "  - 'single",
+    "",
+    "    quoted'",
+    "  done: true",
+    "",
+  ].join("\n");
+  assert.deepEqual(parseYamlDocs(rendered), [
+    {
+      spec: {
+        target: {
+          template: {
+            data: {
+              password: "{{ .password }}",
+              uri: 'postgresql://ranker_service:{{ .password | urlquery | replace "+" "%20" }}@ranker-db-rw.corpus-ranker.svc:5432/ranker?sslmode=require',
+              username: "ranker_service",
+            },
+            type: "kubernetes.io/basic-auth",
+          },
+        },
+        args: ["a long plain item", "a quoted item with escape", "single\nquoted"],
+        done: true,
+      },
+    },
+  ]);
+});
+
 test("the rendered overlay declares the ranker CNPG cluster with separate migrator and service roles and a pre-sync migration Job run as the migrator", () => {
   // --- The CNPG cluster: the migrator owns the database (and so the schema).
   const cluster = findObject("Cluster", "ranker-db");

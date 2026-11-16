@@ -12,13 +12,14 @@
 // changes a Score event; the only rows it writes are the saved view's.
 import { randomUUID } from "node:crypto";
 import { loadContracts, openapiUri, type SchemaRegistry } from "../contracts/index.ts";
-import { literal, type Sql } from "../db/psql.ts";
+import type { Db, Queryable } from "../db/client.ts";
 import { KernelError, type DimensionScore, type Policy, type ScoreEvent } from "../kernel/index.ts";
 import { rankScores } from "../rank/ranked-view.ts";
 import type { ApiResponse } from "./capture.ts";
 
 export interface TopNDeps {
-  sql: Sql;
+  /** The ranker database, as the app role; a derived view is saved in one transaction. */
+  db: Queryable & Pick<Db, "transaction">;
   now: () => Date;
   /** Ranked View id generator (default: cr_view_ + random UUID hex). */
   newViewId?: () => string;
@@ -56,6 +57,11 @@ const error = (status: number, code: string, message: string): ApiResponse => ({
 const newViewId = () => `cr_view_${randomUUID().replaceAll("-", "")}`;
 const ISO = `'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'`;
 
+interface SavedView {
+  view: Omit<TopN, "view_id" | "entries"> | null;
+  entries: (Omit<TopNEntry, "dimension_values"> & { dimension_scores: DimensionScore[] })[];
+}
+
 const dimensionValues = (scores: readonly DimensionScore[]) => Object.fromEntries(scores.map((d) => [d.dimension, d.value]));
 
 /** Handle POST /v1/top-n with an already-read request body. */
@@ -71,17 +77,17 @@ export async function topN(rawBody: string, deps: TopNDeps): Promise<ApiResponse
     .map((e) => `${e.instancePath || "/"} ${e.message}`);
   if (problems.length > 0) return error(400, "invalid_request", problems.join("; "));
   const req = body as TopNRequest;
-  return "view_id" in req ? savedView(req.view_id, deps.sql) : derivedView(req, deps);
+  return "view_id" in req ? savedView(req.view_id, deps.db) : derivedView(req, deps);
 }
 
 /** The entries of a saved Ranked View, with the dimension values of the Score events each entry cites. */
-async function savedView(viewId: string, sql: Sql): Promise<ApiResponse> {
-  const v = literal(viewId);
-  const found = JSON.parse(
-    await sql(`select json_build_object(
+async function savedView(viewId: string, db: Queryable): Promise<ApiResponse> {
+  // $1 view id.
+  const [row] = await db.query<{ found: SavedView }>(
+    `select json_build_object(
         'view', (select json_build_object('policy_id', policy_id, 'policy_version', policy_version,
                                           'stale', stale, 'stale_reason', stale_reason)
-                   from ranked_views where id = ${v}),
+                   from ranked_views where id = $1),
         'entries', coalesce((
           select json_agg(json_build_object(
                    'item_id', e.item_id, 'rank', e.rank, 'title', i.title, 'summary', i.summary, 'composite', e.composite,
@@ -90,11 +96,10 @@ async function savedView(viewId: string, sql: Sql): Promise<ApiResponse> {
                                          where s.id = any (e.score_event_ids)))
                  order by e.rank)
             from ranked_view_entries e join items i on i.id = e.item_id
-           where e.view_id = ${v}), '[]'))`),
-  ) as {
-    view: Omit<TopN, "view_id" | "entries"> | null;
-    entries: (Omit<TopNEntry, "dimension_values"> & { dimension_scores: DimensionScore[] })[];
-  };
+           where e.view_id = $1), '[]')) as found`,
+    [viewId],
+  );
+  const found = row!.found;
   if (found.view === null) return error(404, "view_not_found", `no ranked view ${viewId}`);
   const out: TopN = {
     view_id: viewId,
@@ -113,10 +118,10 @@ async function derivedView(req: Extract<TopNRequest, { policy_name: string }>, d
     return error(400, "unsupported_query", `only a subject query is supported (got ${Object.keys(req.query).join(", ")})`);
   }
 
-  const c = literal(req.corpus_id);
-  const policies = JSON.parse(
-    await deps.sql(`select json_build_object(
-        'corpus_exists', exists (select 1 from corpora where id = ${c}),
+  // $1 corpus id, $2 policy name.
+  const [policyRow] = await deps.db.query<{ found: { corpus_exists: boolean; policies: Policy[] } }>(
+    `select json_build_object(
+        'corpus_exists', exists (select 1 from corpora where id = $1),
         'policies', coalesce((
           select json_agg(json_build_object(
                    'id', p.id, 'version', p.version, 'name', p.name, 'corpus_id', p.corpus_id, 'dimensions', p.dimensions,
@@ -124,9 +129,11 @@ async function derivedView(req: Extract<TopNRequest, { policy_name: string }>, d
                    'created_at', to_char(p.created_at at time zone 'UTC', ${ISO}), 'supersedes_version', p.supersedes_version)
                  order by p.id)
             from policies p
-           where p.corpus_id = ${c} and p.name = ${literal(req.policy_name)}
-             and p.version = (select max(q.version) from policies q where q.id = p.id)), '[]'))`),
-  ) as { corpus_exists: boolean; policies: Policy[] };
+           where p.corpus_id = $1 and p.name = $2
+             and p.version = (select max(q.version) from policies q where q.id = p.id)), '[]')) as found`,
+    [req.corpus_id, req.policy_name],
+  );
+  const policies = policyRow!.found;
   if (!policies.corpus_exists) return error(404, "corpus_not_found", `no corpus ${req.corpus_id}`);
   if (policies.policies.length === 0) {
     return error(404, "policy_not_found", `corpus ${req.corpus_id} has no policy named ${req.policy_name}`);
@@ -139,9 +146,9 @@ async function derivedView(req: Extract<TopNRequest, { policy_name: string }>, d
 
   // The version's live Score events of active items in the corpus, in
   // recording order (what `rank` expects), with those items' title and summary.
-  const p = literal(policy.id);
-  const stored = JSON.parse(
-    await deps.sql(`select json_build_object(
+  // $1 corpus id, $2 policy id, $3 policy version.
+  const [storedRow] = await deps.db.query<{ found: { scores: ScoreEvent[]; items: Record<string, { title: string; summary: string | null }> } }>(
+    `select json_build_object(
         'scores', coalesce((
           select json_agg(json_build_object(
                    'id', s.id, 'item_id', s.item_id, 'policy_id', s.policy_id, 'policy_version', s.policy_version,
@@ -150,16 +157,18 @@ async function derivedView(req: Extract<TopNRequest, { policy_name: string }>, d
                    'retracted_at', null, 'retracted_by', null, 'retraction_reason', null)
                  order by s.recorded_at, s.id)
             from score_events s join items i on i.id = s.item_id
-           where s.policy_id = ${p} and s.policy_version = ${policy.version}
-             and i.corpus_id = ${c} and i.status = 'active'
+           where s.policy_id = $2 and s.policy_version = $3
+             and i.corpus_id = $1 and i.status = 'active'
              and not exists (select 1 from score_retractions r where r.score_event_id = s.id)), '[]'),
         'items', coalesce((
           select json_object_agg(i.id, json_build_object('title', i.title, 'summary', i.summary))
             from items i
-           where i.corpus_id = ${c} and i.status = 'active'
-             and exists (select 1 from score_events s where s.item_id = i.id and s.policy_id = ${p}
-                           and s.policy_version = ${policy.version})), '{}'))`),
-  ) as { scores: ScoreEvent[]; items: Record<string, { title: string; summary: string | null }> };
+           where i.corpus_id = $1 and i.status = 'active'
+             and exists (select 1 from score_events s where s.item_id = i.id and s.policy_id = $2
+                           and s.policy_version = $3)), '{}')) as found`,
+    [req.corpus_id, policy.id, policy.version],
+  );
+  const stored = storedRow!.found;
 
   let ranked;
   try {
@@ -171,19 +180,31 @@ async function derivedView(req: Extract<TopNRequest, { policy_name: string }>, d
 
   // Save the Ranked View (it is reproducible from the Score events it cites).
   const viewId = (deps.newViewId ?? newViewId)();
-  const v = literal(viewId);
-  const entryRows = ranked.map(
-    (e) =>
-      `(${v}, ${e.rank}, ${literal(e.item_id)}, ${e.composite}, array[${e.score_event_ids.map(literal).join(", ")}]::text[])`,
-  );
-  const out = await deps.sql(`SET standard_conforming_strings = on;
-    begin;
-    insert into ranked_views (id, name, corpus_id, policy_id, policy_version, query, computed_at)
-    values (${v}, ${literal(`top-n-${req.policy_name}`)}, ${c}, ${p}, ${policy.version},
-            ${literal(JSON.stringify({ subject: req.query.subject }))}::jsonb, ${literal(deps.now().toISOString())}::timestamptz);
-    ${entryRows.length > 0 ? `insert into ranked_view_entries (view_id, rank, item_id, composite, score_event_ids) values ${entryRows.join(",\n      ")};` : ""}
-    commit;
-    select id from ranked_views where id = ${v};`);
+  const out = await deps.db.transaction(async (tx) => {
+    await tx.query(
+      `insert into ranked_views (id, name, corpus_id, policy_id, policy_version, query, computed_at)
+       values ($1, $2, $3, $4, $5, $6::jsonb, $7::timestamptz)`,
+      [
+        viewId,
+        `top-n-${req.policy_name}`,
+        req.corpus_id,
+        policy.id,
+        policy.version,
+        JSON.stringify({ subject: req.query.subject }),
+        deps.now().toISOString(),
+      ],
+    );
+    for (const e of ranked) {
+      // The cited Score event ids go as a JSON array of text, unpacked into text[].
+      await tx.query(
+        `insert into ranked_view_entries (view_id, rank, item_id, composite, score_event_ids)
+         values ($1, $2, $3, $4, array(select jsonb_array_elements_text($5::jsonb)))`,
+        [viewId, e.rank, e.item_id, e.composite, JSON.stringify(e.score_event_ids)],
+      );
+    }
+    const [saved] = await tx.query<{ id: string }>("select id from ranked_views where id = $1", [viewId]);
+    return saved?.id;
+  });
   if (out !== viewId) throw new Error(`ranked view ${viewId} was not recorded (got ${JSON.stringify(out)})`);
 
   const result: TopN = {

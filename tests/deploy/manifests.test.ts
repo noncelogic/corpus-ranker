@@ -20,6 +20,9 @@ import { parseYamlDocs, type K8sObject } from "./render.ts";
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const deployDir = resolve(repoRoot, "deploy");
 
+/** The only generator-sourced ExternalSecrets: the database role passwords (CR-D1-DBPASS). */
+const GENERATED_DB_SECRETS = ["ranker-db-service", "ranker-db-migrator"];
+
 const CONTRACT = ["RANKER_PORT", "RANKER_DATABASE_URL", "RANKER_S3_ENDPOINT", "RANKER_S3_BUCKET"];
 
 function tryRun(cmd: string, args: string[]): string | undefined {
@@ -154,9 +157,17 @@ test("manifests target namespace corpus-ranker with CNPG, MinIO, ExternalSecrets
   const externalSecrets = docs.filter((d) => d.kind === "ExternalSecret");
   assert.ok(externalSecrets.length > 0, "no ExternalSecret rendered");
   for (const es of externalSecrets) {
-    // Store-backed secrets come from OpenBao; the database passwords are
-    // generated in-cluster instead (tests/deploy/db-passwords.test.ts).
-    if (/^\s+generatorRef:$/m.test(es.text) && !/secretStoreRef:/.test(es.text)) continue;
+    // Every secret comes from OpenBao except the two named database role
+    // secrets, which the ranker-db-password Password generator makes in-cluster
+    // (tests/deploy/db-passwords.test.ts). Of these the API reads only
+    // ranker-db-service, for RANKER_DATABASE_URL (tests/deploy/external-secrets.test.ts).
+    // A generator source anywhere else is refused.
+    if (GENERATED_DB_SECRETS.includes(es.name)) {
+      assert.doesNotMatch(es.text, /secretStoreRef:/, `${es.name} must not read a SecretStore`);
+      assert.match(es.text, /generatorRef:\n\s+apiVersion: generators\.external-secrets\.io\/v1alpha1\n\s+kind: Password\n\s+name: ranker-db-password$/m, `${es.name} must be sourced by Password/ranker-db-password`);
+      continue;
+    }
+    assert.doesNotMatch(es.text, /generatorRef:/, `${es.name} is generator-sourced; only ${GENERATED_DB_SECRETS.join(" and ")} may be`);
     assert.match(es.text, /kind: ClusterSecretStore\n\s+name: openbao$/m, `${es.name} does not use the OpenBao ClusterSecretStore`);
   }
 

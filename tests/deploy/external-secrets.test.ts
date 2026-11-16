@@ -1,4 +1,4 @@
-// CR-D1-SECRETS acceptance: every secret the rendered ranker API Deployment
+// CR-D1-SECRETS / CR-D1-SECRETS-OVERLAY acceptance: every secret the rendered ranker API Deployment
 // reads at boot (secret-backed env vars, envFrom Secrets, secret volumes and
 // its image pull Secret) is materialised by an ExternalSecret that reads the
 // estate OpenBao through the ClusterSecretStore `openbao`, from paths under
@@ -102,18 +102,29 @@ function assertProducesKey(es: K8sObject, key: string): void {
   else if (!extracts) assert.ok(dataKeys.includes(key), `ExternalSecret/${es.metadata.name} produces no key ${key}`);
 }
 
-/** The whole rule, over a set of rendered objects. */
-function assertBootSecretsSourced(objs: K8sObject[]): void {
+/** One Secret the rendered ranker API Deployment reads, and what reads it. */
+interface SecretRead {
+  /** `env NAME`, `envFrom <container>`, `volume <name>` or `imagePullSecret`. */
+  consumer: string;
+  secret: string;
+  /** The Secret key an env var reads, when it reads one. */
+  key?: string;
+}
+
+const DB_URL_READ = `env ${GENERATED_ENV}`;
+
+/** Every Secret the rendered ranker-api Deployment reads at boot, after checking nothing secret bypasses a Secret. */
+function bootSecretReads(objs: K8sObject[]): SecretRead[] {
   const deployment = find(objs, "Deployment", "ranker-api");
   const podSpec = deployment.spec.template.spec;
-  const secretEnv = new Map<string, string>();
+  const reads: SecretRead[] = [];
   let mountsApiKeys = false;
 
   for (const c of containers(deployment)) {
     for (const ref of c.envFrom ?? []) {
       assert.equal(ref.configMapRef, undefined, `container ${c.name} loads env from a ConfigMap; secrets must not hide there`);
-      assertFromOpenBao(externalSecretFor(objs, ref.secretRef?.name));
-      assert.notEqual(ref.secretRef.optional, true, `container ${c.name} must not boot without Secret ${ref.secretRef.name}`);
+      assert.notEqual(ref.secretRef?.optional, true, `container ${c.name} must not boot without Secret ${ref.secretRef?.name}`);
+      reads.push({ consumer: `envFrom ${c.name}`, secret: ref.secretRef?.name });
     }
     for (const env of (c.env ?? []) as EnvVar[]) {
       const ref = env.valueFrom?.secretKeyRef;
@@ -123,11 +134,7 @@ function assertBootSecretsSourced(objs: K8sObject[]): void {
         continue;
       }
       assert.notEqual(ref.optional, true, `${env.name} must not be optional: the service needs it at boot`);
-      const es = externalSecretFor(objs, ref.name);
-      if (env.name === GENERATED_ENV) assertFromDbGenerator(objs, es);
-      else assertFromOpenBao(es);
-      assertProducesKey(es, ref.key);
-      secretEnv.set(env.name, ref.name);
+      reads.push({ consumer: `env ${env.name}`, secret: ref.name, key: ref.key });
     }
 
     // The API key set is a mounted Secret volume; RANKER_API_KEYS_DIR points the service at it.
@@ -140,64 +147,119 @@ function assertBootSecretsSourced(objs: K8sObject[]): void {
       mountsApiKeys = true;
     }
   }
-
-  for (const name of BOOT_SECRET_ENV) assert.ok(secretEnv.has(name), `the Deployment must read ${name} from a Secret`);
   assert.ok(mountsApiKeys, "the Deployment must set RANKER_API_KEYS_DIR to its mounted API key Secret");
 
-  // The database URL's Secret is read by nothing else in the API, so the exception stays exact.
-  const dbSecret = secretEnv.get(GENERATED_ENV)!;
-  for (const [name, secret] of secretEnv) {
-    if (name !== GENERATED_ENV) assert.notEqual(secret, dbSecret, `${name} must not read the generated database Secret ${dbSecret}`);
-  }
-
-  // Every secret volume and image pull Secret of the API is an OpenBao ExternalSecret too.
   for (const volume of podSpec.volumes ?? []) {
     const names: string[] = [
       ...(volume.secret ? [volume.secret.secretName] : []),
       ...(volume.projected?.sources ?? []).filter((s: Record<string, any>) => s.secret).map((s: Record<string, any>) => s.secret.name),
     ];
-    for (const secretName of names) {
-      assertFromOpenBao(externalSecretFor(objs, secretName));
-      assert.notEqual(volume.secret?.optional, true, `volume ${volume.name} must not be optional`);
-    }
+    if (names.length > 0) assert.notEqual(volume.secret?.optional, true, `volume ${volume.name} must not be optional`);
+    for (const secret of names) reads.push({ consumer: `volume ${volume.name}`, secret });
   }
-  for (const pull of podSpec.imagePullSecrets ?? []) assertFromOpenBao(externalSecretFor(objs, pull.name));
+  for (const pull of podSpec.imagePullSecrets ?? []) reads.push({ consumer: "imagePullSecret", secret: pull.name });
 
-  // The API keys come straight from kv/corpus-ranker/api-keys, one property per principal.
-  assert.deepEqual(externalSecretFor(objs, "ranker-api-keys").spec.dataFrom, [{ extract: { key: "corpus-ranker/api-keys" } }]);
-
+  for (const name of BOOT_SECRET_ENV) assert.ok(reads.some((r) => r.consumer === `env ${name}`), `the Deployment must read ${name} from a Secret`);
   // Nothing secret is rendered from git.
   for (const o of objs) assert.notEqual(o.kind, "Secret", `Secret/${o.metadata.name} is rendered from git`);
+  return reads;
 }
 
-/** A copy of the render with `edit` applied to ExternalSecret `name`. */
-function withExternalSecret(name: string, edit: (spec: Record<string, any>) => void): K8sObject[] {
+/** Does the ExternalSecret draw on a generator anywhere? */
+const isGeneratorSourced = (es: K8sObject): boolean =>
+  [...(es.spec.data ?? []), ...(es.spec.dataFrom ?? [])].some((d: Record<string, any>) => d.sourceRef?.generatorRef !== undefined);
+
+/** Acceptance 1: every runtime secret but RANKER_DATABASE_URL comes from OpenBao under kv/corpus-ranker. */
+function assertNonDatabaseSecretsFromOpenBao(objs: K8sObject[]): void {
+  const reads = bootSecretReads(objs);
+  const dbSecret = reads.find((r) => r.consumer === DB_URL_READ)!.secret;
+  for (const read of reads) {
+    if (read.consumer === DB_URL_READ) continue;
+    assert.notEqual(read.secret, dbSecret, `${read.consumer} must not read the generated database Secret ${dbSecret}`);
+    const es = externalSecretFor(objs, read.secret);
+    assertFromOpenBao(es);
+    if (read.key !== undefined) assertProducesKey(es, read.key);
+  }
+  // The API keys come straight from kv/corpus-ranker/api-keys, one property per principal.
+  assert.deepEqual(externalSecretFor(objs, "ranker-api-keys").spec.dataFrom, [{ extract: { key: "corpus-ranker/api-keys" } }]);
+}
+
+/** Acceptance 2: RANKER_DATABASE_URL is the one generator-sourced read, from the non-refreshing ranker-db-password generator. */
+function assertOnlyDatabaseUrlGenerated(objs: K8sObject[]): void {
+  const reads = bootSecretReads(objs);
+  const generated = reads.filter((r) => isGeneratorSourced(externalSecretFor(objs, r.secret))).map((r) => r.consumer);
+  assert.deepEqual(generated, [DB_URL_READ], `only ${GENERATED_ENV} may be generator-sourced (generator-sourced: ${generated.join(", ")})`);
+  const db = reads.find((r) => r.consumer === DB_URL_READ)!;
+  const es = externalSecretFor(objs, db.secret);
+  assertFromDbGenerator(objs, es);
+  assertProducesKey(es, db.key!);
+}
+
+/** A copy of the render with `edit` applied to the `kind`/`name` object's spec. */
+function withEdit(kind: string, name: string, edit: (spec: Record<string, any>) => void): K8sObject[] {
   const objs = structuredClone(renderObjects());
-  edit(find(objs, "ExternalSecret", name).spec);
+  edit(find(objs, kind, name).spec);
   return objs;
 }
+const withExternalSecret = (name: string, edit: (spec: Record<string, any>) => void): K8sObject[] => withEdit("ExternalSecret", name, edit);
 
 const generatorSource = (spec: Record<string, any>): void => {
   delete spec.secretStoreRef;
   delete spec.data;
   spec.dataFrom = [{ sourceRef: { generatorRef: { ...DB_GENERATOR } } }];
 };
+const NON_DB_EXTERNAL_SECRETS = ["ranker-minio-service", "ranker-api-keys", "ranker-ghcr-pull"];
 
-test("every secret the rendered ranker Deployment reads at boot is sourced from an OpenBao ExternalSecret under kv/corpus-ranker, except RANKER_DATABASE_URL, which only the non-refreshing ranker-db-password generator sources", () => {
-  assertBootSecretsSourced(renderObjects());
+test("every non-database secret environment variable the rendered ranker Deployment reads is sourced from an ExternalSecret under kv/corpus-ranker", () => {
+  assertNonDatabaseSecretsFromOpenBao(renderObjects());
 
   // The rule bites: a generator source for any other runtime secret is refused ...
-  for (const name of ["ranker-minio-service", "ranker-api-keys", "ranker-ghcr-pull"]) {
-    assert.throws(() => assertBootSecretsSourced(withExternalSecret(name, generatorSource)), /must read the estate OpenBao store/, `a generator-sourced ${name} was accepted`);
+  for (const name of NON_DB_EXTERNAL_SECRETS) {
+    assert.throws(() => assertNonDatabaseSecretsFromOpenBao(withExternalSecret(name, generatorSource)), /must read the estate OpenBao store/, `a generator-sourced ${name} was accepted`);
   }
-  // ... as is OpenBao outside kv/corpus-ranker or another store,
-  assert.throws(() => assertBootSecretsSourced(withExternalSecret("ranker-minio-service", (s) => (s.data[0].remoteRef.key = "other-app/minio"))));
-  assert.throws(() => assertBootSecretsSourced(withExternalSecret("ranker-api-keys", (s) => (s.secretStoreRef = { kind: "SecretStore", name: "openbao" }))));
-  // ... and the database URL from anything but the non-refreshing ranker-db-password generator.
-  assert.throws(() => assertBootSecretsSourced(withExternalSecret("ranker-db-service", (s) => (s.refreshInterval = "1h"))));
-  assert.throws(() => assertBootSecretsSourced(withExternalSecret("ranker-db-service", (s) => (s.dataFrom[0].sourceRef.generatorRef.name = "other-password"))));
+  // ... even mixed in beside an OpenBao read,
+  assert.throws(
+    () => assertNonDatabaseSecretsFromOpenBao(withExternalSecret("ranker-minio-service", (s) => (s.dataFrom = [{ sourceRef: { generatorRef: { ...DB_GENERATOR } } }]))),
+    /must not mix in other sources/,
+  );
+  // ... as is OpenBao outside kv/corpus-ranker, another store,
+  assert.throws(() => assertNonDatabaseSecretsFromOpenBao(withExternalSecret("ranker-minio-service", (s) => (s.data[0].remoteRef.key = "other-app/minio"))), /outside kv\/corpus-ranker/);
+  assert.throws(() => assertNonDatabaseSecretsFromOpenBao(withExternalSecret("ranker-api-keys", (s) => (s.secretStoreRef = { kind: "SecretStore", name: "openbao" }))));
+  // ... a non-database variable riding on the generated database Secret,
+  assert.throws(
+    () =>
+      assertNonDatabaseSecretsFromOpenBao(
+        withEdit("Deployment", "ranker-api", (s) => {
+          const env = s.template.spec.containers[0].env.find((e: EnvVar) => e.name === "RANKER_S3_SECRET_ACCESS_KEY");
+          env.valueFrom.secretKeyRef = { name: "ranker-db-service", key: "password" };
+        }),
+      ),
+    /must not read the generated database Secret/,
+  );
+  // ... and a secret-looking variable set in plain text.
+  assert.throws(
+    () =>
+      assertNonDatabaseSecretsFromOpenBao(
+        withEdit("Deployment", "ranker-api", (s) => s.template.spec.containers[0].env.push({ name: "RANKER_EXTRA_TOKEN", value: "x" })),
+      ),
+    /looks secret/,
+  );
+});
+
+test("RANKER_DATABASE_URL is the only generator-sourced secret and comes from the non-refreshing Password generator", () => {
+  assertOnlyDatabaseUrlGenerated(renderObjects());
+
+  // A generator source for any other runtime secret is refused: the exception is RANKER_DATABASE_URL alone.
+  for (const name of NON_DB_EXTERNAL_SECRETS) {
+    assert.throws(() => assertOnlyDatabaseUrlGenerated(withExternalSecret(name, generatorSource)), /only RANKER_DATABASE_URL may be generator-sourced/, `a generator-sourced ${name} was accepted`);
+  }
+  // The database URL comes only from the non-refreshing ranker-db-password Password generator.
+  assert.throws(() => assertOnlyDatabaseUrlGenerated(withExternalSecret("ranker-db-service", (s) => (s.refreshInterval = "1h"))), /must not refresh/);
+  assert.throws(() => assertOnlyDatabaseUrlGenerated(withExternalSecret("ranker-db-service", (s) => delete s.refreshInterval)), /must not refresh/);
+  assert.throws(() => assertOnlyDatabaseUrlGenerated(withExternalSecret("ranker-db-service", (s) => (s.dataFrom[0].sourceRef.generatorRef.name = "other-password"))));
+  assert.throws(() => assertOnlyDatabaseUrlGenerated(withExternalSecret("ranker-db-service", (s) => (s.dataFrom[0].sourceRef.generatorRef.kind = "UUID"))));
   assert.throws(() =>
-    assertBootSecretsSourced(
+    assertOnlyDatabaseUrlGenerated(
       withExternalSecret("ranker-db-service", (s) => {
         s.secretStoreRef = { kind: "ClusterSecretStore", name: "openbao" };
         s.dataFrom = [{ extract: { key: "corpus-ranker/db" } }];

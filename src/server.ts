@@ -4,14 +4,14 @@ import { createServer as createHttpServer, type IncomingMessage, type Server } f
 import { fileURLToPath } from "node:url";
 import { capture, type ApiResponse } from "./api/capture.ts";
 import { loadConfig, type RankerConfig } from "./config.ts";
-import { psqlClient, type Sql } from "./db/psql.ts";
+import { pgClient, type Queryable } from "./db/client.ts";
 import { s3ObjectStore, type ObjectStore } from "./storage/object-store.ts";
 
 export { loadConfig, type RankerConfig };
 
 export interface ServerDeps {
-  /** SQL runner for the ranker database (default: psql against config.databaseUrl). */
-  sql?: Sql;
+  /** The ranker database (default: a pooled in-process client for config.databaseUrl, closed with the server). */
+  db?: Queryable;
   /** Clock (default: system time). */
   now?: () => Date;
   /** Store for captured bytes (default: the S3-compatible store in config.objectStore). */
@@ -30,7 +30,8 @@ function readBody(req: IncomingMessage): Promise<string> {
 }
 
 export function createServer(config: RankerConfig, deps: ServerDeps = {}): Server {
-  const sql = deps.sql ?? psqlClient(config.databaseUrl);
+  const owned = deps.db ? undefined : pgClient(config.databaseUrl);
+  const db = deps.db ?? owned!;
   const now = deps.now ?? (() => new Date());
   const store = deps.store ?? s3ObjectStore(config.objectStore);
 
@@ -45,12 +46,12 @@ export function createServer(config: RankerConfig, deps: ServerDeps = {}): Serve
       } catch {
         return { status: 400, body: { error: "invalid_corpus_id", message: "corpus_id is not valid percent-encoding" } };
       }
-      return capture(corpusId, await readBody(req), { sql, now, store });
+      return capture(corpusId, await readBody(req), { db, now, store });
     }
     return { status: 404, body: { error: "not_found", message: `${req.method} ${path}` } };
   };
 
-  return createHttpServer((req, res) => {
+  const server = createHttpServer((req, res) => {
     route(req)
       .catch((err: unknown) => {
         console.error(err);
@@ -61,6 +62,8 @@ export function createServer(config: RankerConfig, deps: ServerDeps = {}): Serve
         res.end(JSON.stringify(body));
       });
   });
+  if (owned) server.on("close", () => void owned.end());
+  return server;
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

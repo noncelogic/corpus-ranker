@@ -29,6 +29,8 @@ export interface FreshDb {
   writeFile(path: string, content: string): void;
   /** The replica MinIO's S3 endpoint, when started with `minio: true`. */
   minioEndpoint?: string;
+  /** Connection string for the `ranker` database as `login` (default: the migration owner), from the host. */
+  databaseUrl(login?: Pick<Login, "user" | "password">): string;
 }
 
 export interface Login {
@@ -71,6 +73,7 @@ export async function freshDatabase(t: TestContext, options: FreshDbOptions = {}
 
   compose(["up", "-d", "--wait", "--wait-timeout", "300", "postgres", ...(options.minio ? ["minio"] : [])]);
   const minioEndpoint = options.minio ? `http://${compose(["port", "minio", "9000"]).trim()}` : undefined;
+  const pgAddress = compose(["port", "postgres", "5432"]).trim();
 
   const psqlArgs = [
     "exec", "-T", "-e", "PGPASSWORD=ranker", "postgres",
@@ -99,6 +102,8 @@ export async function freshDatabase(t: TestContext, options: FreshDbOptions = {}
 
   return {
     minioEndpoint,
+    databaseUrl: (login = { user: "ranker", password: "ranker" }) =>
+      `postgres://${encodeURIComponent(login.user)}:${encodeURIComponent(login.password)}@${pgAddress}/ranker`,
     psql: run,
     psqlAs: (role, sql) => run(`SET ROLE ${role};\n${sql}`),
     pgDump: (args) =>

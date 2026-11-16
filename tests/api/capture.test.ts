@@ -13,8 +13,10 @@ import { loadContracts, openapiUri, schemaUri } from "../../src/contracts/index.
 import { createServer, loadConfig } from "../../src/server.ts";
 import { s3ObjectStore, type ObjectStore } from "../../src/storage/object-store.ts";
 import { freshDatabase, type FreshDb } from "../schema/fresh-db.ts";
+import { removePsqlFromPath } from "../db/no-psql.ts";
 
 const CORPUS = "cr_corpus_papers01";
+const SERVICE = { user: "ranker_svc", password: "svc-local-only" };
 const NOW = "2026-11-16T09:00:00.000Z";
 const contracts = loadContracts();
 const sha256 = (b: Buffer) => createHash("sha256").update(b).digest("hex");
@@ -38,8 +40,12 @@ before(
     });
     db.psql(`insert into corpora (id, name, description, taxonomy_id, status)
                values ('${CORPUS}', 'papers', 'AI papers', 'cr_tax_papers1', 'active')`);
-    // The default object store wiring, pointed at the replica's MinIO.
-    const config = loadConfig({ RANKER_S3_ENDPOINT: db.minioEndpoint });
+    // The service's login holds the app role, as deployment grants it (CR-D1).
+    db.psql(`CREATE ROLE ${SERVICE.user} LOGIN PASSWORD '${SERVICE.password}' IN ROLE ranker_app`);
+    // The service image has no psql; neither does this test process.
+    removePsqlFromPath();
+    // The default database and object store wiring, pointed at the replica.
+    const config = loadConfig({ RANKER_S3_ENDPOINT: db.minioEndpoint, RANKER_DATABASE_URL: db.databaseUrl(SERVICE) });
     store = s3ObjectStore(config.objectStore);
 
     // A source the service fetches source_url captures from.
@@ -52,11 +58,9 @@ before(
     cleanups.push(() => new Promise((ok) => origin.close(ok)));
     source = `http://127.0.0.1:${(origin.address() as AddressInfo).port}`;
 
-    // The service runs as the app role; prove its grants suffice.
-    const server = createServer(config, {
-      sql: async (sql) => db.psqlAs("ranker_app", sql),
-      now: () => new Date(NOW),
-    });
+    // The service runs as the app role through its default in-process
+    // database client; prove the role's grants suffice.
+    const server = createServer(config, { now: () => new Date(NOW) });
     await new Promise<void>((ok) => server.listen(0, "127.0.0.1", ok));
     cleanups.push(() => new Promise((ok) => server.close(ok)));
     base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;

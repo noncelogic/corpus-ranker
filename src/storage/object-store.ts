@@ -1,7 +1,7 @@
 // The ranker's S3-compatible object store (TECH-STACK §5): originals are
 // written once, keyed by the SHA-256 of their bytes, in the ranker's own
 // bucket. A minimal path-style S3 client (AWS Signature Version 4 over
-// node:crypto and fetch), so the service keeps no runtime dependencies.
+// node:crypto and fetch), so the object store adds no runtime dependency.
 import { createHash, createHmac } from "node:crypto";
 
 export interface ObjectStore {

@@ -14,10 +14,11 @@ ENV NODE_ENV=production \
     RANKER_HOST=0.0.0.0 \
     RANKER_PORT=8080
 WORKDIR /app
-# The service reaches its database through the psql client (src/db/psql.ts).
-RUN apk add --no-cache postgresql17-client
-# The service has no npm runtime dependencies; package.json carries "type": "module".
-COPY package.json ./
+# The service reaches its database through an in-process client (src/db/client.ts,
+# docs/decisions/0001-in-process-postgres-client.md): no psql in this image.
+# Runtime npm dependencies only, from the lockfile; package.json carries "type": "module".
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 COPY --from=build /app/dist ./dist
 # dist/contracts/index.js resolves the contract documents from /app/contracts.
 COPY contracts ./contracts

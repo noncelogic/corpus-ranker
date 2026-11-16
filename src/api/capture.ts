@@ -10,7 +10,7 @@
 // under their hash before the Original is recorded, so every Original the API
 // reports names bytes that are retrievable.
 import { loadContracts, openapiUri, schemaUri, type SchemaRegistry } from "../contracts/index.ts";
-import { literal, type Sql } from "../db/psql.ts";
+import type { Queryable } from "../db/client.ts";
 import type { ObjectStore } from "../storage/object-store.ts";
 import { sha256, shortId, type Original, type Provenance } from "../import/jsonl-importer.ts";
 
@@ -24,7 +24,8 @@ export interface CaptureRequest {
 }
 
 export interface CaptureDeps {
-  sql: Sql;
+  /** The ranker database, as the app role. */
+  db: Queryable;
   now: () => Date;
   /** Content-addressed store the captured bytes are written to. */
   store: ObjectStore;
@@ -112,36 +113,43 @@ export async function capture(corpusId: string, rawBody: string, deps: CaptureDe
 
   // The bytes are durable before any Original names them. The key is the
   // content hash, so writing identical bytes again is harmless.
-  const exists = await deps.sql(`select exists (select 1 from corpora where id = ${literal(corpusId)})`);
-  if (exists !== "t") return error(404, "corpus_not_found", `no corpus ${corpusId}`);
+  const [found] = await deps.db.query<{ exists: boolean }>("select exists (select 1 from corpora where id = $1)", [corpusId]);
+  if (!found?.exists) return error(404, "corpus_not_found", `no corpus ${corpusId}`);
   await deps.store.put(hash, bytes, mediaType);
 
   // Insert unless these bytes are already held in the corpus; either way answer
-  // with the stored Original. A concurrent capture of the same bytes may commit
-  // between our snapshot and our insert, so a miss is retried once.
-  const c = literal(corpusId);
-  const h = literal(hash);
-  const statement = `SET standard_conforming_strings = on;
+  // with the stored Original. One statement, so one implicit transaction. A
+  // concurrent capture of the same bytes may commit between our snapshot and
+  // our insert, so a miss is retried once. $1 corpus, $2 content hash.
+  const statement = `
     with ins as (
       insert into originals (id, corpus_id, content_hash, media_type, byte_size, storage_uri, source, raw_metadata)
-      select ${literal(original.id)}, ${c}, ${h}, ${literal(original.media_type)}, ${original.byte_size},
-             ${literal(original.storage_uri)}, ${literal(JSON.stringify(original.source))}::jsonb,
-             ${literal(JSON.stringify(original.raw_metadata))}::jsonb
-      where exists (select 1 from corpora where id = ${c})
+      select $3, $1, $2, $4, $5, $6, $7::jsonb, $8::jsonb
+      where exists (select 1 from corpora where id = $1)
       on conflict (corpus_id, content_hash) do nothing
       returning *
     )
-    select json_build_object('corpus', true, 'created', true, 'original', ${ORIGINAL_JSON}) from ins o
+    select json_build_object('corpus', true, 'created', true, 'original', ${ORIGINAL_JSON}) as result from ins o
     union all
     select json_build_object('corpus', true, 'created', false, 'original', ${ORIGINAL_JSON})
-      from originals o where o.corpus_id = ${c} and o.content_hash = ${h} and not exists (select 1 from ins)
+      from originals o where o.corpus_id = $1 and o.content_hash = $2 and not exists (select 1 from ins)
     union all
-    select json_build_object('corpus', false) where not exists (select 1 from corpora where id = ${c});`;
+    select json_build_object('corpus', false) where not exists (select 1 from corpora where id = $1)`;
+  const params = [
+    corpusId,
+    hash,
+    original.id,
+    original.media_type,
+    original.byte_size,
+    original.storage_uri,
+    JSON.stringify(original.source),
+    JSON.stringify(original.raw_metadata),
+  ];
 
   for (let attempt = 0; attempt < 2; attempt++) {
-    const out = await deps.sql(statement);
-    if (out === "") continue;
-    const result = JSON.parse(out) as { corpus: boolean; created?: boolean; original?: Original };
+    const [row] = await deps.db.query<{ result: { corpus: boolean; created?: boolean; original?: Original } }>(statement, params);
+    if (!row) continue;
+    const { result } = row;
     if (!result.corpus) return error(404, "corpus_not_found", `no corpus ${corpusId}`);
     return { status: result.created ? 201 : 200, body: result.original };
   }

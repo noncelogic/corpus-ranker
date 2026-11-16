@@ -108,3 +108,41 @@ test("every rendered ranker workload references the ghcr.io/noncelogic/corpus-ra
     }
   }
 });
+
+// Per-product registry credential (policy registry-credential-per-product v2,
+// CR-D1-DEC-PULL): the pull secret is the ranker's own, read from its own
+// OpenBao path and nowhere else -- not a shared or another product's key.
+test("the ranker-ghcr-pull ExternalSecret reads only kv corpus-ranker/ghcr-pull, the ranker's own pull credential", () => {
+  const objects = renderObjects();
+  const matches = objects.filter((o) => o.kind === "ExternalSecret" && o.metadata.name === "ranker-ghcr-pull");
+  assert.equal(matches.length, 1, "exactly one ExternalSecret ranker-ghcr-pull must be rendered");
+  const es = matches[0]!;
+
+  assert.deepEqual(
+    { kind: es.spec?.secretStoreRef?.kind, name: es.spec?.secretStoreRef?.name },
+    { kind: "ClusterSecretStore", name: "openbao" },
+    "ranker-ghcr-pull must read from the OpenBao ClusterSecretStore",
+  );
+  assert.equal(es.spec?.dataFrom, undefined, "ranker-ghcr-pull must not extract or generate whole keys via dataFrom");
+
+  const refs = ((es.spec?.data ?? []) as Array<{ secretKey?: string; remoteRef?: { key?: string; property?: string } }>).map((d) => ({
+    secretKey: d.secretKey,
+    key: d.remoteRef?.key,
+    property: d.remoteRef?.property,
+  }));
+  assert.deepEqual(
+    refs.toSorted((a, b) => String(a.secretKey).localeCompare(String(b.secretKey))),
+    [
+      { secretKey: "token", key: "corpus-ranker/ghcr-pull", property: "token" },
+      { secretKey: "username", key: "corpus-ranker/ghcr-pull", property: "username" },
+    ],
+    "ranker-ghcr-pull must read exactly username and token from kv corpus-ranker/ghcr-pull",
+  );
+
+  // No other ExternalSecret reads the ranker's pull credential.
+  const otherReaders = objects
+    .filter((o) => o.kind === "ExternalSecret" && o.metadata.name !== "ranker-ghcr-pull")
+    .filter((o) => JSON.stringify(o.spec ?? {}).includes("corpus-ranker/ghcr-pull"))
+    .map((o) => o.metadata.name);
+  assert.deepEqual(otherReaders, [], "only ranker-ghcr-pull may read kv corpus-ranker/ghcr-pull");
+});

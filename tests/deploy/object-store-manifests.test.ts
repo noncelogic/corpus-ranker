@@ -13,8 +13,9 @@ import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { deployDir, findObject, renderObjects, type K8sObject } from "./render.ts";
 
 const NAMESPACE = "corpus-ranker";
@@ -235,12 +236,17 @@ test("the provisioning script creates the bucket, a writer-only service user, an
   // Estate-side state: the root credentials already sit at the key.
   baoCli("kv", "put", "-mount=kv", KV_PATH, `root-user=${rootUser}`, `root-password=${rootPassword}`);
 
-  /** Run one step of the Job as its container would, pointed at the throwaway services. */
-  const run = (c: Container, extra: Record<string, string> = {}): void => {
+  /**
+   * Run one step of the Job as its container would, pointed at the throwaway services.
+   * With `failBaoReadsAfter`, a `bao` shim ahead of the real one on PATH fails every
+   * `bao kv get` after that many have succeeded, as an OpenBao outage would.
+   */
+  const run = (c: Container, extra: Record<string, string> = {}, failBaoReadsAfter?: number): void => {
     const env: Record<string, string> = {
       ...valuesOf(c),
       ...(c === bucket ? { MINIO_ROOT_USER: rootUser, MINIO_ROOT_PASSWORD: rootPassword, MINIO_ENDPOINT: `http://${minio}:9000` } : {}),
       ...(c !== bucket ? { BAO_ADDR: `http://${bao}:8200`, BAO_TOKEN: "root" } : {}),
+      ...(failBaoReadsAfter !== undefined ? { PATH: `/tmp/shim:/usr/local/bin:/usr/bin:/bin`, FAIL_AFTER: String(failBaoReadsAfter) } : {}),
       ...extra,
     };
     const scripts = c.volumeMounts!.find((m) => m.name === "scripts")!.mountPath;
@@ -251,6 +257,25 @@ test("the provisioning script creates the bucket, a writer-only service user, an
       "--entrypoint", c.command![0]!, c.image, ...c.command!.slice(1), ...(c.args ?? [])]);
     try {
       docker(["cp", resolve(deployDir, "minio") + "/.", `${name}:${scripts}`]);
+      if (failBaoReadsAfter !== undefined) {
+        const shim = mkdtempSync(join(tmpdir(), "bao-shim-"));
+        try {
+          writeFileSync(join(shim, "bao"), [
+            "#!/bin/sh",
+            'if [ "$1 $2" = "kv get" ]; then',
+            "  n=$(cat /tmp/bao-reads 2>/dev/null || echo 0); echo $((n + 1)) >/tmp/bao-reads",
+            '  if [ "$n" -ge "$FAIL_AFTER" ]; then echo "Error making API request. Code: 503. Service Unavailable" >&2; exit 2; fi',
+            "fi",
+            'exec /bin/bao "$@"',
+            "",
+          ].join("\n"));
+          chmodSync(join(shim, "bao"), 0o755);
+          chmodSync(shim, 0o755);
+          docker(["cp", shim, `${name}:/tmp/shim`]);
+        } finally {
+          rmSync(shim, { recursive: true, force: true });
+        }
+      }
       docker(["start", "-a", name]);
     } finally {
       docker(["rm", "-f", name]);
@@ -315,4 +340,23 @@ test("the provisioning script creates the bucket, a writer-only service user, an
 
   // Without OpenBao the Job fails rather than inventing credentials nobody holds.
   assert.throws(() => run(credentials, { BAO_ADDR: "http://127.0.0.1:1" }));
+  // ...nor when OpenBao answers but reading the record fails.
+  assert.throws(() => run(credentials, {}, 0));
+
+  // An OpenBao read failure after the first read must not turn into a fresh
+  // password installed on MinIO: the API pods hold the published one. The step
+  // reads the record once, so a later outage cannot reach it.
+  run(credentials, {}, 1);
+  run(bucket);
+  run(publish);
+  assert.equal(kvField("service-password"), password, "an OpenBao read failure replaced the published password");
+  assert.equal(put(service, "sha256/dd")[0], 0, "the published credentials no longer write");
+
+  // Service credentials present but incomplete are not a reason to mint new ones either.
+  baoCli("kv", "put", "-mount=kv", KV_PATH, `root-user=${rootUser}`, `root-password=${rootPassword}`, `service-user=${user}`);
+  assert.throws(() => run(credentials));
+  baoCli("kv", "patch", "-mount=kv", KV_PATH, `service-password=${password}`);
+  provision();
+  assert.equal(kvField("service-password"), password);
+  assert.equal(put(service, "sha256/ee")[0], 0);
 });

@@ -33,16 +33,29 @@ bao_login() {
 case "$step" in
 credentials)
   bao_login
-  # The key already exists (it holds the MinIO root credentials); failing to
-  # read it is an error, never a reason to mint credentials nobody holds.
-  bao kv get -mount="$BAO_KV_MOUNT" "$BAO_KV_PATH" >/dev/null
-  user=$(bao kv get -mount="$BAO_KV_MOUNT" -field=service-user "$BAO_KV_PATH" 2>/dev/null || true)
-  password=$(bao kv get -mount="$BAO_KV_MOUNT" -field=service-password "$BAO_KV_PATH" 2>/dev/null || true)
-  if [ "$user" != "$RANKER_SERVICE_USER" ] || [ -z "$password" ]; then
+  # The key already exists (it holds the MinIO root credentials). Read it once:
+  # failing to read it is an error, never a reason to mint credentials nobody
+  # holds (a replaced password would lock out the API pods still holding the
+  # published one). bao prints the record's data as JSON, one field per line.
+  record=$(bao kv get -mount="$BAO_KV_MOUNT" -format=json -field=data "$BAO_KV_PATH")
+  case "$record" in
+  "{"*"}") ;;
+  *) echo "unreadable record at $BAO_KV_MOUNT/$BAO_KV_PATH" >&2; exit 1 ;;
+  esac
+  has_field() { printf '%s\n' "$record" | grep -q "^  \"$1\":"; }
+  field() { printf '%s\n' "$record" | sed -n "s/^  \"$1\": \"\([A-Za-z0-9._-]*\)\",\{0,1\}\$/\1/p"; }
+  if ! has_field service-user && ! has_field service-password; then
     echo "generating credentials for MinIO user $RANKER_SERVICE_USER"
     password=$(head -c 96 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 40)
     [ "${#password}" -eq 40 ] || { echo "password generation failed" >&2; exit 1; }
   else
+    user=$(field service-user)
+    password=$(field service-password)
+    if [ "$user" != "$RANKER_SERVICE_USER" ] || [ -z "$password" ]; then
+      echo "$BAO_KV_MOUNT/$BAO_KV_PATH holds service credentials that are not a usable" \
+        "password for MinIO user $RANKER_SERVICE_USER; refusing to replace them" >&2
+      exit 1
+    fi
     echo "reusing the published credentials of MinIO user $RANKER_SERVICE_USER"
   fi
   printf '%s' "$RANKER_SERVICE_USER" >"$work/service-user"

@@ -49,3 +49,46 @@ test("the test PATH leaves psql unresolvable and docker resolvable when both liv
     });
   }
 });
+
+// CR-TEST-PATH-RELATIVE acceptance: a relative PATH entry (e.g. `bin` or `.`)
+// holding psql and docker. Shadow links built as join(dir, name) were relative
+// and resolved against the temporary shadow directory, so docker ran before
+// filtering and failed with ENOENT after it; the links must be absolute.
+test("the test PATH leaves psql unresolvable and docker resolvable when both live in a relative PATH entry", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "cr-relative-bin-"));
+  const cwd = process.cwd();
+  t.after(() => {
+    process.chdir(cwd);
+    rmSync(root, { recursive: true, force: true });
+  });
+  const shPath = (process.env.PATH ?? "").split(delimiter).filter((d) => d !== "" && d !== "." && d !== "bin");
+  const run = (cmd: string, path: string) => spawnSync(cmd, [], { env: { PATH: path }, encoding: "utf8" });
+
+  // `bin` is resolved against `root`; `.` is `root/here` itself.
+  for (const [entry, workdir, holder] of [
+    ["bin", root, join(root, "bin")],
+    [".", join(root, "here"), join(root, "here")],
+  ] as const) {
+    await t.test(`PATH entry ${JSON.stringify(entry)}`, () => {
+      mkdirSync(holder, { recursive: true });
+      for (const name of ["psql", "docker"]) {
+        writeFileSync(join(holder, name), `#!/bin/sh\necho ${name}-ran\n`);
+        chmodSync(join(holder, name), 0o755);
+      }
+      process.chdir(workdir);
+      const before = [entry, ...shPath].join(delimiter);
+      assert.equal(run("psql", before).stdout.trim(), "psql-ran", "fixture: psql resolvable before");
+      assert.equal(run("docker", before).stdout.trim(), "docker-ran", "fixture: docker resolvable before");
+
+      const after = pathWithoutPsql(before);
+
+      const psql = run("psql", after);
+      assert.equal((psql.error as NodeJS.ErrnoException | undefined)?.code, "ENOENT", "psql must not resolve");
+      const docker = run("docker", after);
+      assert.equal(docker.error, undefined, "docker must still resolve");
+      assert.equal(docker.stdout.trim(), "docker-ran");
+      // Idempotent: hiding twice changes nothing further.
+      assert.equal(pathWithoutPsql(after), after);
+    });
+  }
+});

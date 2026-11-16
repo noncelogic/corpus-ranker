@@ -30,28 +30,135 @@ bao_login() {
   fi
 }
 
+# Prints the top-level string field $1 of the JSON object on stdin, decoded
+# (every JSON escape, \uXXXX as UTF-8). Exit status: 0 printed, 1 no such field,
+# 2 the field is not a string (or holds U+0000), 3 not a JSON object.
+json_field() {
+  awk -v want="$1" '
+    function ch() { return substr(s, i, 1) }
+    function ws() { while (i <= n && index(" \t\r\n", ch()) > 0) i++ }
+    function hex4(  j, d, v) {
+      v = 0
+      for (j = 0; j < 4; j++) {
+        d = index("0123456789abcdef", tolower(substr(s, i + j, 1)))
+        if (d == 0) { bad = 1; return 0 }
+        v = v * 16 + d - 1
+      }
+      i += 4
+      return v
+    }
+    function utf8(c) {
+      if (c < 128) return sprintf("%c", c)
+      if (c < 2048) return sprintf("%c%c", 192 + int(c / 64), 128 + c % 64)
+      if (c < 65536) return sprintf("%c%c%c", 224 + int(c / 4096), 128 + int(c / 64) % 64, 128 + c % 64)
+      return sprintf("%c%c%c%c", 240 + int(c / 262144), 128 + int(c / 4096) % 64, 128 + int(c / 64) % 64, 128 + c % 64)
+    }
+    # Decodes the string starting at s[i] (a quote), leaving i past its closing quote.
+    function str(  out, c, e, lo) {
+      out = ""; nul = 0; i++
+      while (i <= n) {
+        c = ch()
+        if (c == "\"") { i++; return out }
+        if (c != "\\") { out = out c; i++; continue }
+        e = substr(s, i + 1, 1); i += 2
+        if (e == "\"" || e == "\\" || e == "/") out = out e
+        else if (e == "b") out = out "\b"
+        else if (e == "f") out = out "\f"
+        else if (e == "n") out = out "\n"
+        else if (e == "r") out = out "\r"
+        else if (e == "t") out = out "\t"
+        else if (e == "u") {
+          c = hex4()
+          if (c >= 55296 && c < 56320 && substr(s, i, 2) == "\\u") {
+            i += 2; lo = hex4()
+            if (lo >= 56320 && lo < 57344) c = 65536 + (c - 55296) * 1024 + (lo - 56320)
+            else { out = out utf8(c); c = lo }
+          }
+          if (c == 0) nul = 1
+          out = out utf8(c)
+        } else bad = 1
+        if (bad) return ""
+      }
+      bad = 1
+      return ""
+    }
+    # Skips the value starting at s[i].
+    function skip(  c, d) {
+      c = ch()
+      if (c == "\"") { str(); return }
+      if (c == "{" || c == "[") {
+        d = 0
+        while (i <= n && !bad) {
+          c = ch()
+          if (c == "\"") { str(); continue }
+          if (c == "{" || c == "[") d++
+          if (c == "}" || c == "]") d--
+          i++
+          if (d == 0) return
+        }
+        bad = 1
+        return
+      }
+      while (i <= n && index(",}] \t\r\n", ch()) == 0) i++
+    }
+    { s = s $0 "\n" }
+    END {
+      n = length(s); i = 1; bad = 0
+      ws(); if (ch() != "{") exit 3
+      i++; ws()
+      if (ch() == "}") exit 1
+      for (;;) {
+        ws(); if (ch() != "\"") exit 3
+        k = str(); if (bad) exit 3
+        ws(); if (ch() != ":") exit 3
+        i++; ws()
+        if (k == want) {
+          if (ch() != "\"") exit 2
+          v = str()
+          if (bad) exit 3
+          if (nul) exit 2
+          printf "%s", v
+          exit 0
+        }
+        skip(); if (bad) exit 3
+        ws(); c = ch(); i++
+        if (c == "}") exit 1
+        if (c != ",") exit 3
+      }
+    }'
+}
+
 case "$step" in
 credentials)
   bao_login
   # The key already exists (it holds the MinIO root credentials). Read it once:
   # failing to read it is an error, never a reason to mint credentials nobody
   # holds (a replaced password would lock out the API pods still holding the
-  # published one). bao prints the record's data as JSON, one field per line.
+  # published one). bao prints the record's data as JSON.
   record=$(bao kv get -mount="$BAO_KV_MOUNT" -format=json -field=data "$BAO_KV_PATH")
   case "$record" in
   "{"*"}") ;;
   *) echo "unreadable record at $BAO_KV_MOUNT/$BAO_KV_PATH" >&2; exit 1 ;;
   esac
-  has_field() { printf '%s\n' "$record" | grep -q "^  \"$1\":"; }
-  field() { printf '%s\n' "$record" | sed -n "s/^  \"$1\": \"\([A-Za-z0-9._-]*\)\",\{0,1\}\$/\1/p"; }
-  if ! has_field service-user && ! has_field service-password; then
+  # Decodes the service fields with every value MinIO accepts (any JSON string),
+  # sets $<var> to it and $<var>_status to json_field's status.
+  get_field() {
+    _v=$(printf '%s\n' "$record" | json_field "$2" && echo ".0" || echo ".$?")
+    eval "$1"'_status=${_v##*.}'
+    eval "$1"'=${_v%.*}'
+  }
+  get_field user service-user
+  get_field password service-password
+  if [ "$user_status" = 3 ] || [ "$password_status" = 3 ]; then
+    echo "unreadable record at $BAO_KV_MOUNT/$BAO_KV_PATH" >&2
+    exit 1
+  fi
+  if [ "$user_status" = 1 ] && [ "$password_status" = 1 ]; then
     echo "generating credentials for MinIO user $RANKER_SERVICE_USER"
     password=$(head -c 96 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 40)
     [ "${#password}" -eq 40 ] || { echo "password generation failed" >&2; exit 1; }
   else
-    user=$(field service-user)
-    password=$(field service-password)
-    if [ "$user" != "$RANKER_SERVICE_USER" ] || [ -z "$password" ]; then
+    if [ "$user_status" != 0 ] || [ "$password_status" != 0 ] || [ "$user" != "$RANKER_SERVICE_USER" ] || [ -z "$password" ]; then
       echo "$BAO_KV_MOUNT/$BAO_KV_PATH holds service credentials that are not a usable" \
         "password for MinIO user $RANKER_SERVICE_USER; refusing to replace them" >&2
       exit 1
@@ -64,7 +171,9 @@ credentials)
 
 bucket)
   user=$(cat "$work/service-user")
-  password=$(cat "$work/service-password")
+  # Kept byte for byte: $(...) alone would strip a published password's trailing newlines.
+  password=$(cat "$work/service-password"; echo .)
+  password=${password%.}
   waited=0
   until mc alias set ranker "$MINIO_ENDPOINT" "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null 2>&1; do
     waited=$((waited + 2))

@@ -359,4 +359,17 @@ test("the provisioning script creates the bucket, a writer-only service user, an
   provision();
   assert.equal(kvField("service-password"), password);
   assert.equal(put(service, "sha256/ee")[0], 0);
+
+  // Published credentials are reused whatever characters they hold: bao prints
+  // them JSON-escaped, and the step decodes rather than pattern-matches them.
+  for (const [n, published] of [
+    "existing+valid/password=123456",
+    'p"q\\r<&>/ é\t😀 x',
+  ].entries()) {
+    baoCli("kv", "patch", "-mount=kv", KV_PATH, `service-password=${published}`);
+    provision();
+    assert.equal(kvField("service-password"), published, "the published password was not reused as is");
+    const [code, out] = put({ user, password: published }, `sha256/f${n}`);
+    assert.equal(code, 0, `the published password ${JSON.stringify(published)} does not write: ${out}`);
+  }
 });

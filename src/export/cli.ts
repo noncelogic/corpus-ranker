@@ -1,5 +1,5 @@
-// One command for the SPEC A5 bundle, against RANKER_DATABASE_URL using the
-// psql and pg_dump clients on PATH:
+// One command for the SPEC A5 bundle, against RANKER_DATABASE_URL through the
+// in-process Postgres client, with the pg_dump client on PATH for the dump:
 //   node src/export/cli.ts export <out-dir>       (npm run export -- <out-dir>)
 //   node src/export/cli.ts restore <bundle-dir>   (into an empty database)
 import { fileURLToPath } from "node:url";
@@ -15,7 +15,12 @@ export async function main(argv: readonly string[], env: NodeJS.ProcessEnv = pro
     return 2;
   }
   const db = cliSession(loadConfig(env).databaseUrl);
-  const manifest = command === "export" ? await exportBundle(db, dir) : await restoreBundle(db, dir);
+  let manifest;
+  try {
+    manifest = command === "export" ? await exportBundle(db, dir) : await restoreBundle(db, dir);
+  } finally {
+    await db.end();
+  }
   console.log(JSON.stringify({ [command === "export" ? "exported" : "restored"]: dir, counts: manifest.counts }));
   return 0;
 }

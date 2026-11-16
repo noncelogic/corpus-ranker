@@ -28,12 +28,29 @@ cannot reach its store from its own image cannot capture, score or rank.
      json/jsonb result columns are parsed.
    - `transaction(fn)` runs `fn` on one connection inside `BEGIN … COMMIT`,
      and rolls back when `fn` rejects.
-3. No service code path spawns `psql`. The service image no longer installs
-   `postgresql17-client`; it installs the lockfile's runtime dependencies
-   (`npm ci --omit=dev`).
-4. The adapter's tests (`tests/db/client.test.ts`) and the capture API tests
-   take `psql` off the test process's `PATH` before the service touches the
-   database. The test host therefore cannot supply what the image lacks. The
+3. No code path spawns `psql`: not the service, and not the operator
+   export/restore CLI (`src/export/`, `npm run export|restore`). The service
+   image no longer installs `postgresql17-client`; it installs the lockfile's
+   runtime dependencies (`npm ci --omit=dev`).
+   - Export holds one read-only repeatable-read transaction on the client,
+     exports its snapshot, runs `pg_dump --snapshot` on it and reads the
+     schema version and JSONL inside the same transaction, as before. The
+     JSONL rows are read as the JSON objects' text, so bundle files are
+     byte-for-byte what they were.
+   - Restore runs the emptiness check, the role preamble, the dump and the
+     verification in one client transaction, which rolls back on any error,
+     leaving the target as found.
+   - The dump is the one external program left: `pg_dump` has no in-process
+     equivalent, and only the operator CLI uses it. It is taken with
+     `--inserts`, so `database.sql` is plain SQL the client can send.
+     `COPY … FROM stdin` blocks (inline data only `psql` can feed) are
+     refused with a clear error. `pg_dump`'s `\restrict`/`\unrestrict` lines
+     guard `psql` itself and are dropped.
+4. The adapter's tests (`tests/db/client.test.ts`), the capture API tests
+   and the export/restore tests take `psql` off the test process's `PATH`
+   before the code under test touches the database, and
+   `tests/db/no-psql-source.test.ts` fails if any source file names `psql`
+   as a program. The test host therefore cannot supply what the image lacks. The
    fixtures' own setup SQL still runs `psql` inside the Postgres container
    (`docker compose exec`), which is outside the code under test.
 
@@ -77,9 +94,7 @@ test pins this behaviour.
 
 ## Out of scope / follow-ups
 
-- `src/export/` (the operator export/restore CLI, `npm run export|restore`)
-  still drives `psql` and `pg_dump` on the operator's host. It is not part of
-  the service's request path, and `pg_dump` has no in-process equivalent.
-  Whether to move it is a separate decision.
+- The export/restore CLI still needs `pg_dump` on the operator's host (see
+  decision 3).
 - Pool sizing (`max: 10`) and timeouts are defaults, not tuned against
   production load.

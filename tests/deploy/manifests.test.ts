@@ -147,7 +147,8 @@ test("manifests target namespace corpus-ranker with CNPG, MinIO, ExternalSecrets
   find("Deployment", "ranker-minio");
   find("PersistentVolumeClaim", "ranker-minio-data");
   find("Service", "ranker-minio");
-  assert.match(find("Deployment", "ranker-minio").text, /ranker-originals/);
+  // The bucket is provisioned by its Job (tests/deploy/object-store-manifests.test.ts).
+  assert.match(find("Job", "ranker-minio-provision").text, /value: ranker-originals$/m);
   find("Service", "ranker-api");
 
   const externalSecrets = docs.filter((d) => d.kind === "ExternalSecret");

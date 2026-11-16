@@ -44,7 +44,7 @@ spec:
           type: RuntimeDefault
       containers:
         - name: minio
-          image: cgr.dev/chainguard/minio:latest@sha256:a1ac4589a5f8136b616e667b48a0bea9719bb10bd45799ea946f24bbedfafde4
+          image: docker.io/pgsty/minio:RELEASE.2026-08-04T00-00-00Z@sha256:b6bfe7239bfc83fb90d31612d9704d86039dd714f7904b3f1ad68f211e602372
           env:
             - name: RANKER_BUCKET
               value: ranker-originals

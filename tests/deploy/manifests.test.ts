@@ -15,6 +15,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync, readdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { parseYamlDocs, type K8sObject } from "./render.ts";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const deployDir = resolve(repoRoot, "deploy");
@@ -164,6 +165,33 @@ test("manifests target namespace corpus-ranker with CNPG, MinIO, ExternalSecrets
       assert.doesNotMatch(doc.text, /type: (LoadBalancer|NodePort)/, `Service/${doc.name} is exposed outside the cluster`);
     }
   }
+});
+
+test("the replica and the deployment run the same MinIO image, pinned by release tag and digest", () => {
+  // docs/decisions/0001-minio-image-source.md: a rolling tag (e.g. the free
+  // Chainguard tier's `latest`) pinned by digest stops pulling once the
+  // registry drops the superseded digest. Pin a release tag *and* its digest
+  // from a registry that keeps serving tagged releases.
+  const [compose] = parseYamlDocs(readFileSync(resolve(repoRoot, "docker-compose.yaml"), "utf8")) as Array<{
+    services?: { minio?: { image?: string } };
+  }>;
+  const replicaImage = compose?.services?.minio?.image;
+  assert.ok(typeof replicaImage === "string", "docker-compose.yaml has no services.minio.image");
+
+  const [minioDeployment] = parseYamlDocs(find("Deployment", "ranker-minio").text) as unknown as K8sObject[];
+  const containers = (minioDeployment?.spec as { template?: { spec?: { containers?: Array<{ name?: string; image?: string }> } } })
+    ?.template?.spec?.containers ?? [];
+  const minio = containers.find((c) => c.name === "minio");
+  assert.ok(minio?.image, "Deployment/ranker-minio has no minio container image");
+
+  assert.equal(minio.image, replicaImage, "the replica and the deployment must run the same MinIO image");
+
+  const pin = /^(?<repo>[a-z0-9.\-/]+):(?<tag>RELEASE\.\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z)@sha256:[0-9a-f]{64}$/.exec(replicaImage);
+  assert.ok(pin, `MinIO image ${replicaImage} must be <repo>:RELEASE.<timestamp>@sha256:<digest>`);
+  assert.doesNotMatch(pin.groups!.repo!, /^cgr\.dev\//, "cgr.dev's free tier serves only rolling tags, whose old digests stop pulling");
+
+  const adr = readFileSync(resolve(repoRoot, "docs", "decisions", "0001-minio-image-source.md"), "utf8");
+  assert.ok(adr.includes(replicaImage), "the ADR must record the pinned image it chose");
 });
 
 test("no CI workflow touches a live cluster", () => {

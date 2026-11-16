@@ -51,12 +51,13 @@ export interface Item {
   updated_at: string;
 }
 
-/** In-memory Items and Originals, indexed for capture-hash and arXiv-ID dedup. */
+/** In-memory Items and Originals, indexed for capture-hash, arXiv-ID and URL dedup. */
 export class CorpusStore {
   readonly #items = new Map<string, Item>();
   readonly #originals = new Map<string, Original>();
   readonly #byHash = new Map<string, string>();
   readonly #byArxiv = new Map<string, string>();
+  readonly #byUrl = new Map<string, string>();
 
   items(): Item[] {
     return [...this.#items.values()];
@@ -84,6 +85,12 @@ export class CorpusStore {
     return this.items().find((i) => i.identity_keys.arxiv_id === id);
   }
 
+  /** The Item in `corpusId` whose `url` identity key is `url` (compared exactly; callers normalise). */
+  itemByUrl(url: string, corpusId: string): Item | undefined {
+    const itemId = this.#byUrl.get(`${corpusId}\0${url}`);
+    return itemId === undefined ? undefined : this.#items.get(itemId);
+  }
+
   originalByHash(corpusId: string, contentHash: string): Original | undefined {
     const id = this.#byHash.get(`${corpusId}\0${contentHash}`);
     return id === undefined ? undefined : this.#originals.get(id);
@@ -98,6 +105,8 @@ export class CorpusStore {
     this.#items.set(i.id, i);
     const arxiv = i.identity_keys.arxiv_id;
     if (arxiv !== undefined) this.#byArxiv.set(`${i.corpus_id}\0${arxiv}`, i.id);
+    const url = i.identity_keys.url;
+    if (url !== undefined) this.#byUrl.set(`${i.corpus_id}\0${url}`, i.id);
   }
 }
 

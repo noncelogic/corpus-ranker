@@ -5,7 +5,7 @@
 // Score (greatest `scored_at`; a tie goes to the one recorded later). Entries
 // are ordered by composite, then by the Policy's tie-break dimensions, then by
 // item id so the order is fully determined.
-import { composite, KernelError, type RankerKernel, type ScoreEvent } from "../kernel/index.ts";
+import { composite, KernelError, type Policy, type RankerKernel, type ScoreEvent } from "../kernel/index.ts";
 import type { CorpusStore } from "../import/jsonl-importer.ts";
 
 export interface RankedViewEntry {
@@ -55,23 +55,57 @@ const byScoredAt = (a: ScoreEvent, b: ScoreEvent) => Date.parse(a.scored_at) - D
 export function rank(kernel: RankerKernel, store: CorpusStore, input: RankInput): RankedView {
   const policy = kernel.getPolicy(input.policy_id, input.policy_version);
   if (!policy) throw new KernelError("policy_version_not_found", `policy ${input.policy_id} has no version ${input.policy_version}`);
+  const live = kernel.liveScores({ policy_id: input.policy_id, policy_version: input.policy_version });
+  const ranked = rankScores(policy, live, (itemId) => {
+    const item = store.item(itemId);
+    return item !== undefined && item.corpus_id === input.corpus_id && item.status === "active";
+  }, input);
+  return {
+    id: input.id,
+    name: input.name,
+    corpus_id: input.corpus_id,
+    policy_id: input.policy_id,
+    policy_version: input.policy_version,
+    query: { subject: input.query.subject },
+    entries: ranked.map(({ score: _, ...entry }) => entry),
+    computed_at: input.computed_at,
+    stale: false,
+    stale_reason: null,
+    action_events: [],
+  };
+}
+
+/** A ranked entry with the Score event it rests on. */
+export interface RankedScore extends RankedViewEntry {
+  score: ScoreEvent;
+}
+
+/**
+ * The ordering core of `rank`, independent of where scores and items are kept:
+ * `liveScores` are the version's non-retracted Score events in recording order;
+ * `rankable` says whether an item is an active member of the ranked corpus.
+ */
+export function rankScores(
+  policy: Policy,
+  liveScores: readonly ScoreEvent[],
+  rankable: (itemId: string) => boolean,
+  input: Pick<RankInput, "corpus_id" | "n">,
+): RankedScore[] {
   if (policy.corpus_id !== input.corpus_id) {
-    throw new KernelError("corpus_mismatch", `policy ${input.policy_id} belongs to corpus ${policy.corpus_id}, not ${input.corpus_id}`);
+    throw new KernelError("corpus_mismatch", `policy ${policy.id} belongs to corpus ${policy.corpus_id}, not ${input.corpus_id}`);
   }
 
   // liveScores is in recording order, so `>= 0` lets a later-recorded tie win.
   const latest = new Map<string, ScoreEvent>();
-  for (const s of kernel.liveScores({ policy_id: input.policy_id, policy_version: input.policy_version })) {
+  for (const s of liveScores) {
+    if (s.policy_id !== policy.id || s.policy_version !== policy.version) continue;
     const prev = latest.get(s.item_id);
     if (prev === undefined || byScoredAt(s, prev) >= 0) latest.set(s.item_id, s);
   }
 
   const value = (s: ScoreEvent, dim: string) => s.dimension_scores.find((d) => d.dimension === dim)?.value ?? -Infinity;
   const candidates = [...latest.values()]
-    .filter((s) => {
-      const item = store.item(s.item_id);
-      return item !== undefined && item.corpus_id === input.corpus_id && item.status === "active";
-    })
+    .filter((s) => rankable(s.item_id))
     .map((s) => ({ score: s, composite: composite(policy, s.dimension_scores) }));
   candidates.sort((a, b) => {
     if (a.composite !== b.composite) return b.composite - a.composite;
@@ -83,17 +117,5 @@ export function rank(kernel: RankerKernel, store: CorpusStore, input: RankInput)
   });
 
   const kept = input.n === undefined ? candidates : candidates.slice(0, input.n);
-  return {
-    id: input.id,
-    name: input.name,
-    corpus_id: input.corpus_id,
-    policy_id: input.policy_id,
-    policy_version: input.policy_version,
-    query: { subject: input.query.subject },
-    entries: kept.map((c, i) => ({ item_id: c.score.item_id, rank: i + 1, composite: c.composite, score_event_ids: [c.score.id] })),
-    computed_at: input.computed_at,
-    stale: false,
-    stale_reason: null,
-    action_events: [],
-  };
+  return kept.map((c, i) => ({ item_id: c.score.item_id, rank: i + 1, composite: c.composite, score_event_ids: [c.score.id], score: c.score }));
 }

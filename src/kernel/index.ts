@@ -174,6 +174,56 @@ export function composite(policy: Policy, dimensionScores: readonly DimensionSco
   return sum;
 }
 
+/**
+ * The `score` rules for one cited Policy version: the Score must match the
+ * contract, score only the version's dimensions (each at most once, on its
+ * scale) and come from a scorer the version allows. Returns the operation's
+ * inputs with no id or time yet; throws KernelError otherwise.
+ */
+export function checkScore(
+  policy: Pick<Policy, "id" | "version" | "dimensions" | "judge_config">,
+  input: ScoreInput,
+  registry: SchemaRegistry,
+): ScoreInput {
+  // Only the operation's own inputs are carried; the id and times are assigned on record.
+  const fields: ScoreInput = {
+    item_id: input.item_id,
+    policy_id: input.policy_id,
+    policy_version: input.policy_version,
+    dimension_scores: input.dimension_scores,
+    scorer: input.scorer,
+    source_blind: input.source_blind,
+  };
+  const event: ScoreEvent = {
+    id: "cr_score_unassigned",
+    ...fields,
+    scored_at: "1970-01-01T00:00:00Z",
+    retracted_at: null,
+    retracted_by: null,
+    retraction_reason: null,
+  };
+  const errors = registry.validate(event, schemaUri("score-event.schema.json"));
+  if (errors.length) throw new KernelError("invalid_score", `score does not match the contract: ${describe(errors)}`, errors);
+
+  const seen = new Set<string>();
+  for (const s of input.dimension_scores) {
+    const dim = policy.dimensions.find((d) => d.name === s.dimension);
+    if (!dim) throw new KernelError("invalid_score", `dimension ${s.dimension} is not in ${policy.id} v${policy.version}`);
+    if (seen.has(s.dimension)) throw new KernelError("invalid_score", `dimension ${s.dimension} scored twice`);
+    seen.add(s.dimension);
+    if (s.value < dim.scale.min || s.value > dim.scale.max) {
+      throw new KernelError("invalid_score", `dimension ${s.dimension}: ${s.value} outside ${dim.scale.min}..${dim.scale.max}`);
+    }
+    if (dim.scale.kind === "integer" && !Number.isInteger(s.value)) {
+      throw new KernelError("invalid_score", `dimension ${s.dimension}: ${s.value} is not an integer`);
+    }
+  }
+  if (!policy.judge_config.allowed_scorers.some((a) => a.identity === input.scorer.identity)) {
+    throw new KernelError("scorer_not_allowed", `${input.scorer.identity} may not score under ${policy.id} v${policy.version}`);
+  }
+  return structuredClone(fields);
+}
+
 export class RankerKernel {
   readonly #log: KernelEvent[] = [];
   readonly #policies = new Map<string, Map<number, Policy>>();
@@ -286,45 +336,7 @@ export class RankerKernel {
 
   /** Validates a score against the contract and its cited Policy version; returns it with no id or time yet. */
   #checkScore(input: ScoreInput): ScoreInput {
-    const policy = this.#requirePolicy(input.policy_id, input.policy_version);
-
-    // Only the operation's own inputs are carried; the id and times are assigned on record.
-    const fields: ScoreInput = {
-      item_id: input.item_id,
-      policy_id: input.policy_id,
-      policy_version: input.policy_version,
-      dimension_scores: input.dimension_scores,
-      scorer: input.scorer,
-      source_blind: input.source_blind,
-    };
-    const event: ScoreEvent = {
-      id: "cr_score_unassigned",
-      ...fields,
-      scored_at: "1970-01-01T00:00:00Z",
-      retracted_at: null,
-      retracted_by: null,
-      retraction_reason: null,
-    };
-    const errors = this.#registry.validate(event, schemaUri("score-event.schema.json"));
-    if (errors.length) throw new KernelError("invalid_score", `score does not match the contract: ${describe(errors)}`, errors);
-
-    const seen = new Set<string>();
-    for (const s of input.dimension_scores) {
-      const dim = policy.dimensions.find((d) => d.name === s.dimension);
-      if (!dim) throw new KernelError("invalid_score", `dimension ${s.dimension} is not in ${policy.id} v${policy.version}`);
-      if (seen.has(s.dimension)) throw new KernelError("invalid_score", `dimension ${s.dimension} scored twice`);
-      seen.add(s.dimension);
-      if (s.value < dim.scale.min || s.value > dim.scale.max) {
-        throw new KernelError("invalid_score", `dimension ${s.dimension}: ${s.value} outside ${dim.scale.min}..${dim.scale.max}`);
-      }
-      if (dim.scale.kind === "integer" && !Number.isInteger(s.value)) {
-        throw new KernelError("invalid_score", `dimension ${s.dimension}: ${s.value} is not an integer`);
-      }
-    }
-    if (!policy.judge_config.allowed_scorers.some((a) => a.identity === input.scorer.identity)) {
-      throw new KernelError("scorer_not_allowed", `${input.scorer.identity} may not score under ${policy.id} v${policy.version}`);
-    }
-    return structuredClone(fields);
+    return checkScore(this.#requirePolicy(input.policy_id, input.policy_version), input, this.#registry);
   }
 
   #record(input: ScoreInput, historical?: { id: string; scored_at: string }): ScoreEvent {

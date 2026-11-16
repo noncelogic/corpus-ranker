@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { capture, type ApiResponse } from "./api/capture.ts";
 import { score } from "./api/score.ts";
 import { topN } from "./api/top-n.ts";
-import { loadConfig, type RankerConfig } from "./config.ts";
+import { BootConfigError, loadConfig, loadServiceConfig, type RankerConfig } from "./config.ts";
 import { pgClient, type Db } from "./db/client.ts";
 import { s3ObjectStore, type ObjectStore } from "./storage/object-store.ts";
 
@@ -71,7 +71,14 @@ export function createServer(config: RankerConfig, deps: ServerDeps = {}): Serve
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const config = loadConfig();
+  let config: RankerConfig;
+  try {
+    config = loadServiceConfig();
+  } catch (err) {
+    if (!(err instanceof BootConfigError)) throw err;
+    console.error(err.message);
+    process.exit(1);
+  }
   const server = createServer(config);
   server.listen(config.port, config.host, () => {
     console.log(`ranker listening on http://${config.host}:${config.port}`);

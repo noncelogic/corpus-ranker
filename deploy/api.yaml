@@ -7,7 +7,7 @@ kind: Deployment
 metadata:
   name: ranker-api
   annotations:
-    argocd.argoproj.io/sync-wave: "5"
+    argocd.argoproj.io/sync-wave: "8"
 spec:
   replicas: 1
   selector:
@@ -43,18 +43,19 @@ spec:
               value: http://ranker-minio.corpus-ranker.svc.cluster.local:9000
             - name: RANKER_S3_BUCKET
               value: ranker-originals
-            # Originals are written to the ranker's own bucket with the MinIO
-            # credentials (per-principal key scoping is CR-D1-SECRETS).
+            # Originals are written to the ranker's own bucket as the ranker
+            # service user, the bucket's only writer (CRANK-57), never with
+            # the MinIO root credentials (minio-provision-job.yaml).
             - name: RANKER_S3_ACCESS_KEY_ID
               valueFrom:
                 secretKeyRef:
-                  name: ranker-minio
-                  key: MINIO_ROOT_USER
+                  name: ranker-minio-service
+                  key: access-key-id
             - name: RANKER_S3_SECRET_ACCESS_KEY
               valueFrom:
                 secretKeyRef:
-                  name: ranker-minio
-                  key: MINIO_ROOT_PASSWORD
+                  name: ranker-minio-service
+                  key: secret-access-key
           ports:
             - name: http
               containerPort: 8080
@@ -95,7 +96,7 @@ kind: Service
 metadata:
   name: ranker-api
   annotations:
-    argocd.argoproj.io/sync-wave: "5"
+    argocd.argoproj.io/sync-wave: "8"
 spec:
   type: ClusterIP
   selector:

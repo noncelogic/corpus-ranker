@@ -24,6 +24,8 @@ spec:
         runAsGroup: 1000
         seccompProfile:
           type: RuntimeDefault
+      imagePullSecrets:
+        - name: ranker-ghcr-pull
       containers:
         - name: api
           image: ghcr.io/noncelogic/corpus-ranker

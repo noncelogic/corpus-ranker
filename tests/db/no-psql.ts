@@ -6,7 +6,7 @@
 import assert from "node:assert/strict";
 import { accessSync, constants, mkdtempSync, readdirSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, join, resolve } from "node:path";
 
 const HIDDEN = "psql";
 
@@ -27,7 +27,9 @@ function shadowWithoutPsql(dir: string): string {
   if (shadow === undefined) {
     shadow = mkdtempSync(join(tmpdir(), "cr-no-psql-"));
     for (const name of readdirSync(dir)) {
-      if (name !== HIDDEN) symlinkSync(join(dir, name), join(shadow, name));
+      // Absolute targets: a relative PATH entry would otherwise yield links
+      // resolved against the shadow directory, which point nowhere.
+      if (name !== HIDDEN) symlinkSync(resolve(dir, name), join(shadow, name));
     }
     shadows.set(dir, shadow);
     if (shadows.size === 1) process.once("exit", () => shadows.forEach((s) => rmSync(s, { recursive: true, force: true })));

@@ -7,10 +7,10 @@ import { createHash } from "node:crypto";
 import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { exportBundle, restoreBundle, type PgSession } from "../../src/export/bundle.ts";
-import { freshDatabase, type FreshDb } from "../schema/fresh-db.ts";
+import { exportBundle, restoreBundle } from "../../src/export/bundle.ts";
+import { freshDatabase } from "../schema/fresh-db.ts";
+import { pgSession as session } from "./session.ts";
 
-const session = (db: FreshDb): PgSession => ({ query: db.psql, dump: db.pgDump, open: db.psqlProcess });
 
 const SEED = `
 insert into corpora (id, name, description, taxonomy_id, status, created_at)
@@ -50,7 +50,7 @@ test("a restore that fails verification leaves the target empty, and the same re
   const [source, target] = await Promise.all([freshDatabase(t), freshDatabase(t, { migrate: false })]);
   source.psql(SEED);
   const good = join(tmp, "good");
-  const manifest = await exportBundle(session(source), good);
+  const manifest = await exportBundle(session(t, source), good);
 
   const found = target.psql(STATE);
   const bundleDir = join(tmp, "bundle");
@@ -62,21 +62,32 @@ test("a restore that fails verification leaves the target empty, and the same re
     ["schema-version mismatch", (d) => rewrite(d, "database.sql", (s) => s, (m) => { m.schema_version += 1; }),
       /schema version/],
     // The dump breaks off part-way through loading.
-    ["dump that fails to load", (d) => rewrite(d, "database.sql", (s) => s.replace(/COPY public\.items /, "COPY public.no_such_table ")),
-      /psql exited/],
+    ["dump that fails to load", (d) => rewrite(d, "database.sql", (s) => s.replace(/INSERT INTO public\.items /, "INSERT INTO public.no_such_table ")),
+      /relation "public\.no_such_table" does not exist/],
+    // A COPY ... FROM stdin block (bundles exported before --inserts) whose
+    // rows the server rejects part-way through the load.
+    ["COPY rows that fail to load", (d) => rewrite(d, "database.sql", (s) => `${s}\nCOPY public.corpora (id, name, description, taxonomy_id, status, created_at) FROM stdin;\n`
+      + `cr_corpus_x\tx\tX\tcr_tax_x\tactive\t2026-11-01 00:00:00+00\ncr_corpus_papers01\tdup\tD\tcr_tax_x\tactive\t2026-11-01 00:00:00+00\n\\.\n`),
+      /duplicate key value violates unique constraint/],
+    // A COPY row with the wrong number of fields is refused before any write.
+    ["COPY row of the wrong width", (d) => rewrite(d, "database.sql", (s) => `${s}\nCOPY public.corpora (id, name) FROM stdin;\ncr_corpus_x\tx\textra\n\\.\n`),
+      /row 1 has 3 fields, expected 2/],
+    // A COPY ... FROM stdin block with no terminating \. line is refused before any write.
+    ["unterminated COPY block", (d) => rewrite(d, "database.sql", (s) => `${s}\nCOPY public.corpora (id, name) FROM stdin;\ncr_corpus_x\tx\n`),
+      /has no terminating \\\. line/],
   ];
   for (const [fault, inject, expected] of faults) {
     rmSync(bundleDir, { recursive: true, force: true });
     cpSync(good, bundleDir, { recursive: true });
     inject(bundleDir);
-    await assert.rejects(restoreBundle(session(target), bundleDir), expected, fault);
+    await assert.rejects(restoreBundle(session(t, target), bundleDir), expected, fault);
     assert.equal(target.psql(STATE), found, `${fault}: target left as found`);
   }
 
   // The same restore, against the same target, succeeds once the bundle is sound.
   rmSync(bundleDir, { recursive: true, force: true });
   cpSync(good, bundleDir, { recursive: true });
-  assert.deepEqual(await restoreBundle(session(target), bundleDir), manifest);
+  assert.deepEqual(await restoreBundle(session(t, target), bundleDir), manifest);
   const items = "select string_agg(id || ':' || title, ',' order by id) from items";
   assert.equal(target.psql(items), source.psql(items));
 });
@@ -87,21 +98,21 @@ test("restore into a target that already holds corpus data is refused before any
   const [source, target] = await Promise.all([freshDatabase(t), freshDatabase(t, { migrate: false })]);
   source.psql(SEED);
   const bundleDir = join(tmp, "bundle");
-  await exportBundle(session(source), bundleDir);
+  await exportBundle(session(t, source), bundleDir);
 
   // Corpus data the restore must not touch, in a target with no ranker role yet.
   target.psql("create table corpora (id text primary key, name text); insert into corpora values ('cr_corpus_mine', 'mine');");
   const found = target.psql(STATE);
   const rows = target.psql("select json_agg(c order by id) from corpora c");
 
-  await assert.rejects(restoreBundle(session(target), bundleDir), /restore target database "ranker" is not empty/);
+  await assert.rejects(restoreBundle(session(t, target), bundleDir), /restore target database "ranker" is not empty/);
   assert.equal(target.psql(STATE), found);
   assert.equal(target.psql("select json_agg(c order by id) from corpora c"), rows);
   assert.equal(target.psql("select count(*) from pg_roles where rolname = 'ranker_app'"), "0");
 
   // A migrated target holding the corpus itself is refused the same way.
   const sourceFound = source.psql(STATE);
-  await assert.rejects(restoreBundle(session(source), bundleDir), /restore target database "ranker" is not empty/);
+  await assert.rejects(restoreBundle(session(t, source), bundleDir), /restore target database "ranker" is not empty/);
   assert.equal(source.psql(STATE), sourceFound);
   assert.equal(source.psql("select count(*) from items"), "2");
 });

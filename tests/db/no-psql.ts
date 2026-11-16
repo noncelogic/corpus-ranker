@@ -6,7 +6,9 @@
 import assert from "node:assert/strict";
 import { accessSync, constants, mkdtempSync, readdirSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { delimiter, join } from "node:path";
+import { delimiter, join, resolve } from "node:path";
+
+const HIDDEN = "psql";
 
 const executable = (path: string): boolean => {
   try {
@@ -29,17 +31,25 @@ function shadowWithoutPsql(dir: string): string {
     });
   }
   for (const name of readdirSync(dir)) {
-    if (name !== "psql") symlinkSync(join(dir, name), join(shadow, name));
+    // Absolute targets: a relative PATH entry would otherwise yield links
+    // resolved against the shadow directory, which point nowhere.
+    if (name !== HIDDEN) symlinkSync(resolve(dir, name), join(shadow, name));
   }
   return shadow;
 }
 
-/** Hide every psql binary on PATH, keeping the other programs reachable; asserts none is left. */
-export function removePsqlFromPath(): void {
-  const dirs = (process.env.PATH ?? "")
+/** `path` with every directory holding psql swapped for a shadow without it. */
+export function pathWithoutPsql(path: string): string {
+  return path
     .split(delimiter)
     .filter((d) => d !== "")
-    .map((d) => (executable(join(d, "psql")) ? shadowWithoutPsql(d) : d));
-  process.env.PATH = dirs.join(delimiter);
-  assert.equal(dirs.some((d) => executable(join(d, "psql"))), false, "psql must not be on PATH");
+    .map((d) => (executable(join(d, HIDDEN)) ? shadowWithoutPsql(d) : d))
+    .join(delimiter);
+}
+
+/** Hide every psql binary on PATH, keeping the other programs reachable; asserts none is left. */
+export function removePsqlFromPath(): void {
+  process.env.PATH = pathWithoutPsql(process.env.PATH ?? "");
+  const dirs = process.env.PATH.split(delimiter);
+  assert.equal(dirs.some((d) => executable(join(d, HIDDEN))), false, "psql must not be on PATH");
 }

@@ -9,7 +9,9 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync, readdirSync } from "n
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadContracts, schemaUri } from "../../src/contracts/index.ts";
+import { listMigrations } from "../../src/db/migrations.ts";
 import { BUNDLE_VERSION, exportBundle, restoreBundle, type PgSession } from "../../src/export/bundle.ts";
+import { FUNDING_CORPUS_ID, FUNDING_FIT_ID } from "../../src/funding/funding-fit.ts";
 import { freshDatabase, type FreshDb } from "../schema/fresh-db.ts";
 
 const H = (c: string) => c.repeat(64);
@@ -124,10 +126,11 @@ test("export then restore into a fresh database reproduces the corpus", { timeou
   assert.deepEqual(JSON.parse(readFileSync(join(bundleDir, "manifest.json"), "utf8")), manifest);
   assert.equal(manifest.bundle_version, BUNDLE_VERSION);
   assert.equal(manifest.exported_at, "2026-11-10T00:00:00.000Z");
-  assert.equal(manifest.schema_version, 1);
+  assert.equal(manifest.schema_version, listMigrations().at(-1)!.version);
+  // The seeded funding corpus and its policy (migration 0002) ride along.
   assert.deepEqual(manifest.counts, {
-    corpora: 1, originals: 3, items: 2, classifications: 1, edges: 3,
-    policies: 2, scores: 3, views: 1, tombstones: 1,
+    corpora: 2, originals: 3, items: 2, classifications: 1, edges: 3,
+    policies: 3, scores: 3, views: 1, tombstones: 1,
   });
   assert.deepEqual(readdirSync(bundleDir).sort(), [...Object.keys(manifest.files), "manifest.json"].sort());
   for (const [file, meta] of Object.entries(manifest.files)) {
@@ -171,7 +174,9 @@ test("export then restore into a fresh database reproduces the corpus", { timeou
     ["cr_score_s2", 1, "Judge read the wrong PDF."],
     ["cr_score_s3", 2, null],
   ]);
+  assert.deepEqual(readJsonl(bundleDir, "corpora.jsonl").map((c) => c.id).sort(), [FUNDING_CORPUS_ID, "cr_corpus_papers01"].sort());
   assert.deepEqual(readJsonl(bundleDir, "policies.jsonl").map((p) => [p.id, p.version, p.supersedes_version]), [
+    [FUNDING_FIT_ID, 1, null],
     ["cr_pol_paper", 1, null],
     ["cr_pol_paper", 2, 1],
   ]);

@@ -1,0 +1,3 @@
+# Committed export bundles: their bytes are pinned by manifest.json hashes,
+# so git must neither convert line endings nor flag pg_dump's own whitespace.
+* -text -whitespace

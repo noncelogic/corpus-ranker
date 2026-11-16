@@ -1,0 +1,59 @@
+{
+  "bundle_version": 1,
+  "exported_at": "2026-11-16T00:00:00.000Z",
+  "schema_version": 2,
+  "counts": {
+    "corpora": 2,
+    "originals": 3,
+    "items": 2,
+    "classifications": 1,
+    "edges": 3,
+    "policies": 3,
+    "scores": 3,
+    "views": 1,
+    "tombstones": 1
+  },
+  "files": {
+    "classifications.jsonl": {
+      "sha256": "974bd6b95b9f8993edf205e9df822b5651877573a33a9ffe907774cc56a6dde7",
+      "bytes": 299
+    },
+    "corpora.jsonl": {
+      "sha256": "989a83d6963a0ac33c786e80df976a0eb0f66051eec0f27a89fd05d5331f20d0",
+      "bytes": 481
+    },
+    "database.sql": {
+      "sha256": "02d2cfdc16560916e6bb06822d21630713737b6d2772c626fb3717b8c3b40d44",
+      "bytes": 37049
+    },
+    "edges.jsonl": {
+      "sha256": "11a062b9f335bf392a90556449340844024b11e4c5b79ca689169352f74c4b66",
+      "bytes": 824
+    },
+    "items.jsonl": {
+      "sha256": "d7a439651431eae20d62e92b05bddd4f426e2664437050d69a1754caab769a59",
+      "bytes": 813
+    },
+    "originals.jsonl": {
+      "sha256": "654fe9fb3d6cfe3b53ce3024762a8c6e767d89dd37a3f1553682fcf079ce6e93",
+      "bytes": 1781
+    },
+    "policies.jsonl": {
+      "sha256": "020e6c58afea2077c97bd396cb55ae78eeaffdb6e3f27e0d1c36c0184266ee7c",
+      "bytes": 4095
+    },
+    "scores.jsonl": {
+      "sha256": "c27fb768ae9f3c20cc8eeb2cc6a1c3d20e8ff315df330968cd86a4ed038a2b27",
+      "bytes": 1481
+    },
+    "tombstones.jsonl": {
+      "sha256": "3b3db0130c4cf30f16da17bb8e9b95e123a9a73d32966c8d6e4d199b9c05fd11",
+      "bytes": 500
+    },
+    "views.jsonl": {
+      "sha256": "9dccdd5e7b4f960ff8d2a81247ea5f448c84050bf3d634d70159180641e278b1",
+      "bytes": 542
+    }
+  },
+  "embeddings": "excluded"
+}

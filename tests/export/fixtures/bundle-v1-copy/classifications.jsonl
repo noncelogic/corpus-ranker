@@ -1,0 +1,1 @@
+{"id" : "cr_cls_c1", "item_id" : "cr_item_p1", "taxonomy_version" : 1, "labels" : ["research/context-management"], "status" : "committed", "proposed_by" : "agent:classifier", "committed_by" : "joe", "committed_at" : "2026-11-04T01:00:00.000000Z", "confidence" : 0.82, "rationale" : "Agent memory."}

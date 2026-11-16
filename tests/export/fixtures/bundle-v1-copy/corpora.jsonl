@@ -1,0 +1,2 @@
+{"id" : "cr_corpus_funding", "name" : "funding", "description" : "Investors and funding opportunities. Item types: program (a grant, fellowship, accelerator or other funding program) and investor.", "taxonomy_id" : "cr_tax_funding1", "created_at" : "2026-11-16T04:16:35.005689Z", "status" : "active"}
+{"id" : "cr_corpus_papers01", "name" : "papers", "description" : "AI papers", "taxonomy_id" : "cr_tax_papers01", "created_at" : "2026-11-01T00:00:00.000000Z", "status" : "active"}

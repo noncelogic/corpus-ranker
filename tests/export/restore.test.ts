@@ -6,8 +6,9 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { exportBundle, restoreBundle } from "../../src/export/bundle.ts";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { BUNDLE_VERSION, exportBundle, restoreBundle, verifyBundle } from "../../src/export/bundle.ts";
 import { freshDatabase } from "../schema/fresh-db.ts";
 import { pgSession as session } from "./session.ts";
 
@@ -115,4 +116,49 @@ test("restore into a target that already holds corpus data is refused before any
   await assert.rejects(restoreBundle(session(t, source), bundleDir), /restore target database "ranker" is not empty/);
   assert.equal(source.psql(STATE), sourceFound);
   assert.equal(source.psql("select count(*) from items"), "2");
+});
+
+// CR-M3-BUNDLE-V1: a version-1 bundle as the exporter wrote it before
+// --inserts (commit 5e65122: a plain pg_dump whose table data is COPY ... FROM
+// stdin blocks), generated once and committed. Restore must keep loading it,
+// whatever restore path or dump encoding follows; see fixtures/README.md.
+const V1_COPY_BUNDLE = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "bundle-v1-copy");
+
+test("a committed version-1 bundle whose dump carries COPY FROM stdin data restores into an empty database and reproduces its JSONL hashes", { timeout: 900_000 }, async (t) => {
+  // The fixture is what it claims to be: version 1, its files as the
+  // manifest lists them, and its table data in COPY blocks, not INSERTs.
+  const manifest = verifyBundle(V1_COPY_BUNDLE);
+  assert.equal(manifest.bundle_version, 1);
+  assert.equal(BUNDLE_VERSION, 1);
+  const dump = readFileSync(join(V1_COPY_BUNDLE, "database.sql"), "utf8");
+  const copies = dump.match(/^COPY public\.\w+ \(.*\) FROM stdin;$/gm) ?? [];
+  for (const table of ["corpora", "originals", "items", "score_events", "tombstones"]) {
+    assert.ok(copies.some((c) => c.startsWith(`COPY public.${table} (`)), `fixture dump carries ${table} as COPY data`);
+  }
+  assert.doesNotMatch(dump, /^INSERT INTO /m, "fixture dump carries no INSERT statements");
+
+  const tmp = mkdtempSync(join(tmpdir(), "cr-restore-v1-"));
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  const target = await freshDatabase(t, { migrate: false });
+  const found = target.psql(STATE);
+
+  // Atomic: a copy that fails after every COPY block has loaded (a row
+  // duplicated in the last block breaks the primary key pg_dump builds after
+  // the data) leaves the target as found (empty).
+  const broken = join(tmp, "broken");
+  cpSync(V1_COPY_BUNDLE, broken, { recursive: true });
+  rewrite(broken, "database.sql", (s) => s.replace(/^(COPY public\.tombstones .* FROM stdin;\n)(.*\n)/m, "$1$2$2"));
+  await assert.rejects(restoreBundle(session(t, target), broken), /could not create unique index "tombstones_pkey"/);
+  assert.equal(target.psql(STATE), found, "failed load leaves the target as found");
+
+  // The committed bundle itself restores and reproduces every JSONL hash
+  // (restoreBundle re-derives them inside its transaction); check again here.
+  assert.deepEqual(await restoreBundle(session(t, target), V1_COPY_BUNDLE), manifest);
+  const out = join(tmp, "re-export");
+  const again = await exportBundle(session(t, target), out);
+  for (const [file, meta] of Object.entries(manifest.files)) {
+    if (file.endsWith(".jsonl")) assert.equal(again.files[file]?.sha256, meta.sha256, `${file} reproduced`);
+  }
+  assert.deepEqual(again.counts, manifest.counts);
+  assert.equal(again.schema_version, manifest.schema_version);
 });

@@ -1,0 +1,9 @@
+Program,Funder,Program URL,Status,Deadline,Amount,Source,Added By,Added At
+Example Open Research Grant,Example Foundation,https://grants.example.org/open-research,Researching,2026-12-15,"$50,000",https://grants.example.org/,joe,2026-11-02T09:00:00Z
+Synthetic Fellowship,Synthetic Institute,https://fellowship.example.net/apply,Shortlisted,,Stipend,newsletter,agent:intake-funding,2026-11-03T10:00:00Z
+"Placeholder Accelerator, Cohort 3",Placeholder Ventures,https://accelerator.example.com/cohort-3,Applied,2027-01-31,"Up to $100,000
+plus mentoring",https://accelerator.example.com/,joe,2026-11-04T11:30:00Z
+
+Example Open Research Grant (2027 call),Example Foundation,https://Grants.Example.org/open-research/,Applying,2027-02-01,"$60,000",https://grants.example.org/news,joe,2026-11-12T08:15:00Z
+Synthetic Fellowship,Synthetic Institute,https://fellowship.example.net/apply,Shortlisted,,Stipend,newsletter,agent:intake-funding,2026-11-03T10:00:00Z
+No URL Program,Nobody,,Researching,,,,joe,2026-11-05T00:00:00Z

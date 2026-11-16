@@ -14,7 +14,9 @@ ENV NODE_ENV=production \
     RANKER_HOST=0.0.0.0 \
     RANKER_PORT=8080
 WORKDIR /app
-# The service has no runtime dependencies; package.json carries "type": "module".
+# The service reaches its database through the psql client (src/db/psql.ts).
+RUN apk add --no-cache postgresql17-client
+# The service has no npm runtime dependencies; package.json carries "type": "module".
 COPY package.json ./
 COPY --from=build /app/dist ./dist
 # dist/contracts/index.js resolves the contract documents from /app/contracts.

@@ -266,3 +266,29 @@ test("an export taken during concurrent corpus writes restores from one consiste
   assert.deepEqual(await restoreBundle(session(t, fresh), bundleDir), manifest);
   assert.equal(snapshot(fresh, "items", "id"), before);
 });
+
+// pg_dump's arguments as bundles were exported before --inserts: rows come as
+// COPY ... FROM stdin blocks with inline data, which psql used to feed.
+const copyFormat = (s: PgSession): PgSession => ({
+  ...s,
+  dump: (args) => s.dump(args.filter((a) => a !== "--inserts" && !a.startsWith("--rows-per-insert"))),
+});
+
+test("a bundle whose dump carries COPY ... FROM stdin rows restores through the client with no psql on PATH", { timeout: 900_000 }, async (t) => {
+  const tmp = mkdtempSync(join(tmpdir(), "cr-export-"));
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  const [source, fresh] = await Promise.all([freshDatabase(t), freshDatabase(t, { migrate: false })]);
+  source.psql(SEED);
+
+  const bundleDir = join(tmp, "bundle");
+  const manifest = await exportBundle(copyFormat(session(t, source)), bundleDir);
+  const dump = readFileSync(join(bundleDir, "database.sql"), "utf8");
+  assert.match(dump, /^COPY public\.items .* FROM stdin;$/m);
+  assert.doesNotMatch(dump, /^INSERT INTO /m);
+
+  assert.deepEqual(await restoreBundle(session(t, fresh), bundleDir), manifest);
+  for (const [table, order] of RECORD_TABLES) {
+    assert.equal(snapshot(fresh, table, order), snapshot(source, table, order), table);
+  }
+  assert.throws(() => fresh.psqlAs("ranker_app", "update score_events set source_blind = true"), /permission denied/);
+});

@@ -43,9 +43,17 @@ cannot reach its store from its own image cannot capture, score or rank.
    - The dump is the one external program left: `pg_dump` has no in-process
      equivalent, and only the operator CLI uses it. It is taken with
      `--inserts`, so `database.sql` is plain SQL the client can send.
-     `COPY … FROM stdin` blocks (inline data only `psql` can feed) are
-     refused with a clear error. `pg_dump`'s `\restrict`/`\unrestrict` lines
-     guard `psql` itself and are dropped.
+     Bundles exported before this carry `COPY … FROM stdin` blocks, whose
+     inline rows `psql` used to feed; restore still loads them: each block's
+     rows are decoded from COPY text format and sent as parameterised
+     multi-row `INSERT`s into the same table and columns, each value bound as
+     text and cast to its column's type (`$n::text::<type>`), so the type's
+     input function reads it as COPY input would, inside the same restore
+     transaction, so a failing row rolls the whole restore back. (postgres.js's
+     own copy-in stream is not used: it never settles when the server rejects
+     the data, so a bad row would hang the restore.)
+     `pg_dump`'s `\restrict`/`\unrestrict` lines guard `psql` itself and are
+     dropped.
 4. The adapter's tests (`tests/db/client.test.ts`), the capture API tests
    and the export/restore tests take `psql` off the test process's `PATH`
    before the code under test touches the database, and

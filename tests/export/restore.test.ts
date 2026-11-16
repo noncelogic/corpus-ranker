@@ -64,9 +64,17 @@ test("a restore that fails verification leaves the target empty, and the same re
     // The dump breaks off part-way through loading.
     ["dump that fails to load", (d) => rewrite(d, "database.sql", (s) => s.replace(/INSERT INTO public\.items /, "INSERT INTO public.no_such_table ")),
       /relation "public\.no_such_table" does not exist/],
-    // A dump carrying COPY ... FROM stdin data, which only psql can feed, is refused before any write.
-    ["dump with COPY FROM stdin", (d) => rewrite(d, "database.sql", (s) => `${s}\nCOPY public.items (id) FROM stdin;\ncr_item_x\n\\.\n`),
-      /COPY \.\.\. FROM stdin is not supported/],
+    // A COPY ... FROM stdin block (bundles exported before --inserts) whose
+    // rows the server rejects part-way through the load.
+    ["COPY rows that fail to load", (d) => rewrite(d, "database.sql", (s) => `${s}\nCOPY public.corpora (id, name, description, taxonomy_id, status, created_at) FROM stdin;\n`
+      + `cr_corpus_x\tx\tX\tcr_tax_x\tactive\t2026-11-01 00:00:00+00\ncr_corpus_papers01\tdup\tD\tcr_tax_x\tactive\t2026-11-01 00:00:00+00\n\\.\n`),
+      /duplicate key value violates unique constraint/],
+    // A COPY row with the wrong number of fields is refused before any write.
+    ["COPY row of the wrong width", (d) => rewrite(d, "database.sql", (s) => `${s}\nCOPY public.corpora (id, name) FROM stdin;\ncr_corpus_x\tx\textra\n\\.\n`),
+      /row 1 has 3 fields, expected 2/],
+    // A COPY ... FROM stdin block with no terminating \. line is refused before any write.
+    ["unterminated COPY block", (d) => rewrite(d, "database.sql", (s) => `${s}\nCOPY public.corpora (id, name) FROM stdin;\ncr_corpus_x\tx\n`),
+      /has no terminating \\\. line/],
   ];
   for (const [fault, inject, expected] of faults) {
     rmSync(bundleDir, { recursive: true, force: true });

@@ -64,9 +64,9 @@ export const DATABASE_FILE = "database.sql";
 export const MANIFEST_FILE = "manifest.json";
 
 // Owner-independent dump; embedding rows are derived and not carried (SPEC A5).
-// Rows are written as INSERT statements rather than COPY ... FROM stdin, whose
-// inline data only psql can feed, so the whole dump is plain SQL the
-// in-process client can send.
+// Rows are written as INSERT statements, so the dump is plain SQL; restore
+// also loads dumps whose rows are COPY ... FROM stdin blocks (bundles
+// exported before this), feeding their rows through the client's copy-in.
 const DUMP_ARGS = [
   "--format=plain", "--no-owner", "--exclude-table-data=embeddings", "--inserts", "--rows-per-insert=500",
 ] as const;
@@ -237,16 +237,102 @@ select current_database() as target, count(*)::int as relations
  where c.relkind in ('r', 'p', 'v', 'm', 'S', 'f')
    and n.nspname not in ('pg_catalog', 'information_schema') and n.nspname not like 'pg_toast%'`;
 
-/**
- * The dump as SQL the in-process client can send: pg_dump's \restrict and
- * \unrestrict lines are psql meta-commands guarding psql itself and are
- * dropped; COPY ... FROM stdin (inline data only psql can feed) is refused.
- */
-function dumpSql(dump: string): string {
-  if (/^COPY .* FROM stdin;$/m.test(dump)) {
-    throw new Error(`${DATABASE_FILE}: COPY ... FROM stdin is not supported; the dump must be taken with --inserts`);
+/** One piece of the dump, loaded in order: plain SQL, or one table's COPY rows. */
+type DumpPart = { sql: string } | { copy: string; relation: string; columns: string[]; rows: (string | null)[][] };
+
+const COPY_FROM_STDIN = /^COPY (.+) \((.*)\) FROM stdin;$/;
+const COPY_ESCAPES: Readonly<Record<string, number>> = { b: 8, f: 12, n: 10, r: 13, t: 9, v: 11 };
+
+/** Decode one field of COPY text format: \N is null; backslash escapes are read as Postgres reads them. */
+function copyField(field: string): string | null {
+  if (field === "\\N") return null;
+  if (!field.includes("\\")) return field;
+  const out: Buffer[] = [];
+  // Literal runs, and escapes: octal \ooo, hex \xhh, or a backslash and one character.
+  for (const [, literal, octal, hex, other] of field.matchAll(/([^\\]+)|\\([0-7]{1,3})|\\x([0-9A-Fa-f]{1,2})|\\([\s\S]?)/g)) {
+    if (literal !== undefined) out.push(Buffer.from(literal, "utf8"));
+    else if (octal !== undefined) out.push(Buffer.of(parseInt(octal, 8) & 0xff));
+    else if (hex !== undefined) out.push(Buffer.of(parseInt(hex, 16)));
+    else out.push(other! in COPY_ESCAPES ? Buffer.of(COPY_ESCAPES[other!]!) : Buffer.from(other || "\\", "utf8"));
   }
-  return dump.replace(/^\\(un)?restrict [A-Za-z0-9]+$/gm, "");
+  return Buffer.concat(out).toString("utf8");
+}
+
+/**
+ * Split the dump into what the in-process client sends. pg_dump's \restrict
+ * and \unrestrict lines are psql meta-commands guarding psql itself and are
+ * dropped. A `COPY ... FROM stdin;` line (the default dump format, which
+ * bundles exported before --inserts carry) starts inline rows that run to the
+ * `\.` line; they are decoded here and loaded as parameterised INSERTs into
+ * the same table and columns, so no psql is needed to feed them.
+ */
+function dumpParts(dump: string): DumpPart[] {
+  const parts: DumpPart[] = [];
+  const lines = dump.split("\n");
+  let sql: string[] = [];
+  const flush = () => {
+    if (sql.some((l) => l.trim() !== "")) parts.push({ sql: sql.join("\n") });
+    sql = [];
+  };
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    if (/^\\(un)?restrict [A-Za-z0-9]+$/.test(line)) continue;
+    const copy = COPY_FROM_STDIN.exec(line);
+    if (!copy) {
+      sql.push(line);
+      continue;
+    }
+    flush();
+    const end = lines.indexOf("\\.", i + 1);
+    if (end < 0) throw new Error(`${DATABASE_FILE}: ${line} has no terminating \\. line`);
+    // pg_dump names the columns as "relation (col, col, ...)", identifiers quoted where needed.
+    const relation = copy[1]!;
+    const columns = copy[2]!.split(",").map((c) => c.trim());
+    const rows = lines.slice(i + 1, end).map((row, n) => {
+      const fields = row.split("\t").map(copyField);
+      if (fields.length !== columns.length) {
+        throw new Error(`${DATABASE_FILE}: ${line} row ${n + 1} has ${fields.length} fields, expected ${columns.length}`);
+      }
+      return fields;
+    });
+    parts.push({ copy: line, relation, columns, rows });
+    i = end;
+  }
+  flush();
+  return parts;
+}
+
+// Bound parameters per INSERT, well under the protocol's limit of 65535.
+const MAX_PARAMS = 30_000;
+
+/** Load one COPY block's rows as multi-row INSERTs, every value a bound parameter. */
+async function insertCopyRows(tx: Queryable, part: Extract<DumpPart, { copy: string }>): Promise<void> {
+  if (part.rows.length === 0) return;
+  // Each value goes as text and is cast to its column's type, so the column
+  // type's input function reads it exactly as COPY would (the client's own
+  // per-type serialisers, e.g. for boolean or timestamptz, never touch it).
+  const attrs = await tx.query<{ col: string; type: string }>(
+    `select quote_ident(attname) as col, format_type(atttypid, atttypmod) as type
+       from pg_attribute where attrelid = $1::regclass and attnum > 0 and not attisdropped`,
+    [part.relation],
+  );
+  const typeOf = new Map(attrs.map((a) => [a.col, a.type]));
+  const types = part.columns.map((c) => {
+    const type = typeOf.get(c);
+    if (type === undefined) throw new Error(`${DATABASE_FILE}: ${part.copy} names unknown column ${c}`);
+    return type;
+  });
+  const width = types.length;
+  const perInsert = Math.max(1, Math.floor(MAX_PARAMS / width));
+  for (let at = 0; at < part.rows.length; at += perInsert) {
+    const batch = part.rows.slice(at, at + perInsert);
+    const values = batch.map((_, r) => `(${types.map((type, c) => `$${r * width + c + 1}::text::${type}`).join(", ")})`);
+    // As with COPY, supplied values win over identity columns' generated ones.
+    await tx.query(
+      `INSERT INTO ${part.relation} (${part.columns.join(", ")}) OVERRIDING SYSTEM VALUE VALUES ${values.join(", ")}`,
+      batch.flat(),
+    );
+  }
 }
 
 /**
@@ -259,7 +345,7 @@ function dumpSql(dump: string): string {
  */
 export async function restoreBundle(db: PgSession, dir: string): Promise<BundleManifest> {
   const manifest = verifyBundle(dir);
-  const dump = dumpSql(readFileSync(join(dir, DATABASE_FILE), "utf8"));
+  const dump = dumpParts(readFileSync(join(dir, DATABASE_FILE), "utf8"));
   // Any throw below rolls the whole transaction back, preamble role included.
   await db.db.transaction(async (tx) => {
     const [{ target, relations } = { target: "", relations: -1 }] =
@@ -268,7 +354,10 @@ export async function restoreBundle(db: PgSession, dir: string): Promise<BundleM
       throw new Error(`restore target database "${target}" is not empty (${relations} relations); restore needs an empty database`);
     }
     await tx.query(RESTORE_PREAMBLE);
-    await tx.query(dump);
+    for (const part of dump) {
+      if ("copy" in part) await insertCopyRows(tx, part);
+      else await tx.query(part.sql);
+    }
     // The dump empties search_path for the session; restore it for the checks.
     await tx.query("reset search_path");
     const schemaVersion = await schemaVersionOf(tx);

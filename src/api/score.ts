@@ -6,12 +6,13 @@
 // new event, and a correction is a retraction, never an update.
 import { randomUUID } from "node:crypto";
 import { loadContracts, openapiUri, type SchemaRegistry } from "../contracts/index.ts";
-import { literal, type Sql } from "../db/psql.ts";
+import type { Queryable } from "../db/client.ts";
 import { checkScore, KernelError, type Policy, type ScoreInput } from "../kernel/index.ts";
 import type { ApiResponse } from "./capture.ts";
 
 export interface ScoreDeps {
-  sql: Sql;
+  /** The ranker database, as the app role. */
+  db: Queryable;
   now: () => Date;
   /** Score event id generator (default: cr_score_ + random UUID hex). */
   newId?: () => string;
@@ -40,14 +41,16 @@ export async function score(rawBody: string, deps: ScoreDeps): Promise<ApiRespon
   if (problems.length > 0) return error(400, "invalid_request", problems.join("; "));
   const req = body as ScoreInput;
 
-  const p = literal(req.policy_id);
-  const found = JSON.parse(
-    await deps.sql(`select json_build_object(
+  // $1 policy id, $2 policy version, $3 item id.
+  const [row] = await deps.db.query<{ found: { policy: CitedPolicy | null; policy_exists: boolean; item_exists: boolean } }>(
+    `select json_build_object(
         'policy', (select json_build_object('id', id, 'version', version, 'dimensions', dimensions, 'judge_config', judge_config)
-                     from policies where id = ${p} and version = ${req.policy_version}),
-        'policy_exists', exists (select 1 from policies where id = ${p}),
-        'item_exists', exists (select 1 from items where id = ${literal(req.item_id)}))`),
-  ) as { policy: CitedPolicy | null; policy_exists: boolean; item_exists: boolean };
+                     from policies where id = $1 and version = $2),
+        'policy_exists', exists (select 1 from policies where id = $1),
+        'item_exists', exists (select 1 from items where id = $3)) as found`,
+    [req.policy_id, req.policy_version, req.item_id],
+  );
+  const found = row!.found;
 
   if (found.policy === null) {
     return found.policy_exists
@@ -67,12 +70,22 @@ export async function score(rawBody: string, deps: ScoreDeps): Promise<ApiRespon
   // The insert cites the policy version by foreign key, so a version that
   // does not exist can never be stored even if the check above were skipped.
   const id = (deps.newId ?? newScoreId)();
-  const out = await deps.sql(`SET standard_conforming_strings = on;
-    insert into score_events (id, item_id, policy_id, policy_version, dimension_scores, scorer, scored_at, source_blind)
-    values (${literal(id)}, ${literal(checked.item_id)}, ${p}, ${checked.policy_version},
-            ${literal(JSON.stringify(checked.dimension_scores))}::jsonb, ${literal(JSON.stringify(checked.scorer))}::jsonb,
-            ${literal(deps.now().toISOString())}::timestamptz, ${checked.source_blind ? "true" : "false"})
-    returning id;`);
+  const [inserted] = await deps.db.query<{ id: string }>(
+    `insert into score_events (id, item_id, policy_id, policy_version, dimension_scores, scorer, scored_at, source_blind)
+     values ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::timestamptz, $8)
+     returning id`,
+    [
+      id,
+      checked.item_id,
+      req.policy_id,
+      checked.policy_version,
+      JSON.stringify(checked.dimension_scores),
+      JSON.stringify(checked.scorer),
+      deps.now().toISOString(),
+      checked.source_blind,
+    ],
+  );
+  const out = inserted?.id;
   if (out !== id) throw new Error(`score event ${id} was not recorded (got ${JSON.stringify(out)})`);
   return { status: 201, body: { score_event_id: id } };
 }

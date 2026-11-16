@@ -10,10 +10,12 @@ import { loadContracts, openapiUri } from "../../src/contracts/index.ts";
 import { paperRubricV1 } from "../../src/import/paper-rubric.ts";
 import { createServer, loadConfig } from "../../src/server.ts";
 import { freshDatabase, type FreshDb } from "../schema/fresh-db.ts";
+import { removePsqlFromPath } from "../db/no-psql.ts";
 
 const CORPUS = "cr_corpus_papers01";
 const ITEM = "cr_item_p0001";
 const NOW = "2026-11-16T09:00:00.000Z";
+const SERVICE = { user: "ranker_svc", password: "svc-local-only" };
 const contracts = loadContracts();
 const ERROR = `${openapiUri()}#/components/schemas/Error`;
 const RESPONSE = `${openapiUri()}#/components/schemas/ScoreResponse`;
@@ -38,11 +40,13 @@ before(
         values ('${policy.id}', 1, '${policy.name}', '${CORPUS}', '${JSON.stringify(policy.dimensions).replace(/'/g, "''")}',
                 '${JSON.stringify(policy.judge_config)}', '${JSON.stringify(policy.composite_rule)}', 'joe');
     `);
-    // The service runs as the app role; prove its grants suffice.
-    const server = createServer(loadConfig({}), {
-      sql: async (sql) => db.psqlAs("ranker_app", sql),
-      now: () => new Date(NOW),
-    });
+    // The service's login holds the app role, as deployment grants it (CR-D1).
+    db.psql(`CREATE ROLE ${SERVICE.user} LOGIN PASSWORD '${SERVICE.password}' IN ROLE ranker_app`);
+    // The service image has no psql; neither does this test process.
+    removePsqlFromPath();
+    // The service runs as the app role through its default in-process
+    // database client; prove the role's grants suffice.
+    const server = createServer(loadConfig({ RANKER_DATABASE_URL: db.databaseUrl(SERVICE) }), { now: () => new Date(NOW) });
     await new Promise<void>((ok) => server.listen(0, "127.0.0.1", ok));
     cleanups.push(() => new Promise((ok) => server.close(ok)));
     base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;

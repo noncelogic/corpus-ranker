@@ -6,14 +6,14 @@ import { capture, type ApiResponse } from "./api/capture.ts";
 import { score } from "./api/score.ts";
 import { topN } from "./api/top-n.ts";
 import { loadConfig, type RankerConfig } from "./config.ts";
-import { pgClient, type Queryable } from "./db/client.ts";
+import { pgClient, type Db } from "./db/client.ts";
 import { s3ObjectStore, type ObjectStore } from "./storage/object-store.ts";
 
 export { loadConfig, type RankerConfig };
 
 export interface ServerDeps {
   /** The ranker database (default: a pooled in-process client for config.databaseUrl, closed with the server). */
-  db?: Queryable;
+  db?: Db;
   /** Clock (default: system time). */
   now?: () => Date;
   /** Store for captured bytes (default: the S3-compatible store in config.objectStore). */
@@ -50,8 +50,8 @@ export function createServer(config: RankerConfig, deps: ServerDeps = {}): Serve
       }
       return capture(corpusId, await readBody(req), { db, now, store });
     }
-    if (req.method === "POST" && path === "/v1/scores") return score(await readBody(req), { sql, now });
-    if (req.method === "POST" && path === "/v1/top-n") return topN(await readBody(req), { sql, now });
+    if (req.method === "POST" && path === "/v1/scores") return score(await readBody(req), { db, now });
+    if (req.method === "POST" && path === "/v1/top-n") return topN(await readBody(req), { db, now });
     return { status: 404, body: { error: "not_found", message: `${req.method} ${path}` } };
   };
 

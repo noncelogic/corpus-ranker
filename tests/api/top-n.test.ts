@@ -18,9 +18,11 @@ import { rank } from "../../src/rank/ranked-view.ts";
 import { createServer, loadConfig } from "../../src/server.ts";
 import { fakeClock } from "../kernel/fixtures.ts";
 import { freshDatabase, type FreshDb } from "../schema/fresh-db.ts";
+import { removePsqlFromPath } from "../db/no-psql.ts";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const NOW = "2026-11-16T09:00:00.000Z";
+const SERVICE = { user: "ranker_svc", password: "svc-local-only" };
 const PAPERS = "cr_corpus_papers01";
 const TOY = "cr_corpus_toy01";
 const contracts = loadContracts();
@@ -114,11 +116,13 @@ before(
       insert into score_retractions (score_event_id, retracted_by, retraction_reason)
         values ('cr_score_t6', 'joe', 'test: retracted scores do not rank');
     `);
-    // The service runs as the app role; prove its grants suffice.
-    const server = createServer(loadConfig({}), {
-      sql: async (sql) => db.psqlAs("ranker_app", sql),
-      now: () => new Date(NOW),
-    });
+    // The service's login holds the app role, as deployment grants it (CR-D1).
+    db.psql(`CREATE ROLE ${SERVICE.user} LOGIN PASSWORD '${SERVICE.password}' IN ROLE ranker_app`);
+    // The service image has no psql; neither does this test process.
+    removePsqlFromPath();
+    // The service runs as the app role through its default in-process
+    // database client; prove the role's grants suffice.
+    const server = createServer(loadConfig({ RANKER_DATABASE_URL: db.databaseUrl(SERVICE) }), { now: () => new Date(NOW) });
     await new Promise<void>((ok) => server.listen(0, "127.0.0.1", ok));
     cleanups.push(() => new Promise((ok) => server.close(ok)));
     base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;

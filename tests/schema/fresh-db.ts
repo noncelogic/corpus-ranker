@@ -27,6 +27,8 @@ export interface FreshDb {
   sh(script: string, env?: Readonly<Record<string, string>>): string;
   /** Write a file inside the Postgres container (parent directories are created). */
   writeFile(path: string, content: string): void;
+  /** The replica MinIO's S3 endpoint, when started with `minio: true`. */
+  minioEndpoint?: string;
 }
 
 export interface Login {
@@ -38,6 +40,8 @@ export interface Login {
 export interface FreshDbOptions {
   /** Apply the versioned migrations (default true); false leaves an empty instance. */
   migrate?: boolean;
+  /** Also start the replica's MinIO with its bucket provisioned (default false). */
+  minio?: boolean;
 }
 
 export async function freshDatabase(t: TestContext, options: FreshDbOptions = {}): Promise<FreshDb> {
@@ -65,7 +69,8 @@ export async function freshDatabase(t: TestContext, options: FreshDbOptions = {}
     }
   });
 
-  compose(["up", "-d", "--wait", "--wait-timeout", "300", "postgres"]);
+  compose(["up", "-d", "--wait", "--wait-timeout", "300", "postgres", ...(options.minio ? ["minio"] : [])]);
+  const minioEndpoint = options.minio ? `http://${compose(["port", "minio", "9000"]).trim()}` : undefined;
 
   const psqlArgs = [
     "exec", "-T", "-e", "PGPASSWORD=ranker", "postgres",
@@ -93,6 +98,7 @@ export async function freshDatabase(t: TestContext, options: FreshDbOptions = {}
   }
 
   return {
+    minioEndpoint,
     psql: run,
     psqlAs: (role, sql) => run(`SET ROLE ${role};\n${sql}`),
     pgDump: (args) =>

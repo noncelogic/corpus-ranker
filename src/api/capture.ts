@@ -4,8 +4,14 @@
 // captured again into the same corpus return the existing Original (the
 // originals table is UNIQUE on corpus + content hash). Capture is raw intake
 // only: it never classifies or scores inline.
+//
+// The bytes come either inline (content_base64 + media_type) or from
+// source_url, fetched by the service. They are written to the object store
+// under their hash before the Original is recorded, so every Original the API
+// reports names bytes that are retrievable.
 import { loadContracts, openapiUri, schemaUri, type SchemaRegistry } from "../contracts/index.ts";
 import { literal, type Sql } from "../db/psql.ts";
+import type { ObjectStore } from "../storage/object-store.ts";
 import { sha256, shortId, type Original, type Provenance } from "../import/jsonl-importer.ts";
 
 export interface CaptureRequest {
@@ -20,9 +26,16 @@ export interface CaptureRequest {
 export interface CaptureDeps {
   sql: Sql;
   now: () => Date;
-  /** Object store bucket the content-addressed storage URI names. */
-  bucket: string;
+  /** Content-addressed store the captured bytes are written to. */
+  store: ObjectStore;
+  /** Fetch for source_url captures (default: global fetch). */
+  fetch?: typeof fetch;
 }
+
+/** Largest original accepted by source_url capture. */
+export const MAX_SOURCE_BYTES = 64 * 1024 * 1024;
+const SOURCE_TIMEOUT_MS = 60_000;
+const MEDIA_TYPE = /^[a-z]+\/[a-zA-Z0-9.+_-]+$/;
 
 export interface ApiResponse {
   status: number;
@@ -62,22 +75,27 @@ export async function capture(corpusId: string, rawBody: string, deps: CaptureDe
   if (problems.length > 0) return error(400, "invalid_request", problems.join("; "));
   const req = body as CaptureRequest;
 
-  if (req.content_base64 === undefined) {
-    // The contract also admits capture by source_url alone; fetching the bytes
-    // is not built yet, and without bytes there is no content hash to store.
-    return error(400, "unsupported_capture", "capture by source_url without content_base64 is not supported yet");
+  let bytes: Buffer;
+  let mediaType: string;
+  if (req.content_base64 !== undefined) {
+    if (!BASE64.test(req.content_base64)) return error(400, "invalid_request", "/content_base64 must be base64");
+    bytes = Buffer.from(req.content_base64, "base64");
+    mediaType = req.media_type!;
+  } else {
+    const fetched = await fetchSource(req.source_url!, deps.fetch ?? fetch);
+    if ("status" in fetched) return fetched;
+    bytes = fetched.bytes;
+    mediaType = req.media_type ?? fetched.mediaType;
   }
-  if (!BASE64.test(req.content_base64)) return error(400, "invalid_request", "/content_base64 must be base64");
-  const bytes = Buffer.from(req.content_base64, "base64");
   const hash = sha256(bytes);
 
   const original: Original = {
     id: shortId("cr_orig_", corpusId, hash),
     corpus_id: corpusId,
     content_hash: hash,
-    media_type: req.media_type!,
+    media_type: mediaType,
     byte_size: bytes.byteLength,
-    storage_uri: `s3://${deps.bucket}/${hash}`,
+    storage_uri: deps.store.uri(hash),
     source: {
       source_kind: req.source.source_kind,
       source: req.source.source,
@@ -91,6 +109,12 @@ export async function capture(corpusId: string, rawBody: string, deps: CaptureDe
   };
   const invalid = contractErrors(original, schemaUri("original.schema.json"));
   if (invalid.length > 0) return error(400, "invalid_request", `capture does not form a valid Original: ${invalid.join("; ")}`);
+
+  // The bytes are durable before any Original names them. The key is the
+  // content hash, so writing identical bytes again is harmless.
+  const exists = await deps.sql(`select exists (select 1 from corpora where id = ${literal(corpusId)})`);
+  if (exists !== "t") return error(404, "corpus_not_found", `no corpus ${corpusId}`);
+  await deps.store.put(hash, bytes, mediaType);
 
   // Insert unless these bytes are already held in the corpus; either way answer
   // with the stored Original. A concurrent capture of the same bytes may commit
@@ -122,4 +146,52 @@ export async function capture(corpusId: string, rawBody: string, deps: CaptureDe
     return { status: result.created ? 201 : 200, body: result.original };
   }
   throw new Error(`capture of ${hash} into ${corpusId} neither inserted nor found an Original`);
+}
+
+/** Fetch the bytes behind a source_url capture; a failure is the client's (400). */
+async function fetchSource(
+  sourceUrl: string,
+  doFetch: typeof fetch,
+): Promise<{ bytes: Buffer; mediaType: string } | ApiResponse> {
+  let url: URL;
+  try {
+    url = new URL(sourceUrl);
+  } catch {
+    return error(400, "invalid_request", "/source_url must be a valid URL");
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") {
+    return error(400, "invalid_request", "/source_url must be an http or https URL");
+  }
+  const unfetchable = (why: string) => error(400, "source_unfetchable", `source_url ${url.href}: ${why}`);
+  let res: Response;
+  try {
+    res = await doFetch(url, { redirect: "follow", signal: AbortSignal.timeout(SOURCE_TIMEOUT_MS) });
+  } catch (e) {
+    return unfetchable(`fetch failed: ${(e as Error).message}`);
+  }
+  if (!res.ok) {
+    await res.body?.cancel();
+    return unfetchable(`HTTP ${res.status}`);
+  }
+  const declared = Number(res.headers.get("content-length") ?? "0");
+  if (declared > MAX_SOURCE_BYTES) {
+    await res.body?.cancel();
+    return unfetchable(`larger than ${MAX_SOURCE_BYTES} bytes`);
+  }
+  const chunks: Buffer[] = [];
+  let size = 0;
+  try {
+    for await (const chunk of res.body ?? []) {
+      size += chunk.byteLength;
+      if (size > MAX_SOURCE_BYTES) {
+        await res.body?.cancel();
+        return unfetchable(`larger than ${MAX_SOURCE_BYTES} bytes`);
+      }
+      chunks.push(Buffer.from(chunk));
+    }
+  } catch (e) {
+    return unfetchable(`read failed: ${(e as Error).message}`);
+  }
+  const contentType = (res.headers.get("content-type") ?? "").split(";")[0]!.trim().toLowerCase();
+  return { bytes: Buffer.concat(chunks), mediaType: MEDIA_TYPE.test(contentType) ? contentType : "application/octet-stream" };
 }

@@ -2,13 +2,16 @@
 // captured record as an Original in the ranker database and returns its id and
 // content hash; identical bytes captured again return the existing Original; a
 // body that fails the frozen contract's CaptureRequest schema is answered 400
-// and nothing is stored.
+// and nothing is stored. Captured bytes, inline or fetched from source_url, are
+// written to the object store before the Original is reported.
 import { after, before, test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { createServer as createHttpServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { loadContracts, openapiUri, schemaUri } from "../../src/contracts/index.ts";
 import { createServer, loadConfig } from "../../src/server.ts";
+import { s3ObjectStore, type ObjectStore } from "../../src/storage/object-store.ts";
 import { freshDatabase, type FreshDb } from "../schema/fresh-db.ts";
 
 const CORPUS = "cr_corpus_papers01";
@@ -18,6 +21,9 @@ const sha256 = (b: Buffer) => createHash("sha256").update(b).digest("hex");
 
 let db: FreshDb;
 let base: string;
+let store: ObjectStore;
+let source: string;
+const served = new Map<string, { type: string; body: Buffer }>();
 // Teardown registered at module level so it runs after every test, not after the hook.
 const cleanups: (() => unknown)[] = [];
 after(async () => {
@@ -27,11 +33,27 @@ after(async () => {
 before(
   async () => {
     // freshDatabase only needs the teardown hook of a TestContext.
-    db = await freshDatabase({ after: (fn: () => unknown) => void cleanups.push(fn) } as unknown as TestContext);
+    db = await freshDatabase({ after: (fn: () => unknown) => void cleanups.push(fn) } as unknown as TestContext, {
+      minio: true,
+    });
     db.psql(`insert into corpora (id, name, description, taxonomy_id, status)
                values ('${CORPUS}', 'papers', 'AI papers', 'cr_tax_papers1', 'active')`);
+    // The default object store wiring, pointed at the replica's MinIO.
+    const config = loadConfig({ RANKER_S3_ENDPOINT: db.minioEndpoint });
+    store = s3ObjectStore(config.objectStore);
+
+    // A source the service fetches source_url captures from.
+    const origin = createHttpServer((req, res) => {
+      const doc = served.get(req.url ?? "");
+      if (!doc) return void res.writeHead(404).end();
+      res.writeHead(200, { "content-type": doc.type }).end(doc.body);
+    });
+    await new Promise<void>((ok) => origin.listen(0, "127.0.0.1", ok));
+    cleanups.push(() => new Promise((ok) => origin.close(ok)));
+    source = `http://127.0.0.1:${(origin.address() as AddressInfo).port}`;
+
     // The service runs as the app role; prove its grants suffice.
-    const server = createServer(loadConfig({}), {
+    const server = createServer(config, {
       sql: async (sql) => db.psqlAs("ranker_app", sql),
       now: () => new Date(NOW),
     });
@@ -87,6 +109,10 @@ test("a capture stores an Original and returns its id and content hash", async (
   const row = db.psql(`select id || '|' || content_hash || '|' || byte_size from originals where id = '${String(original.id)}'`);
   assert.equal(row, `${String(original.id)}|${sha256(bytes)}|${bytes.byteLength}`);
 
+  // The bytes are retrievable from the object store under the storage URI.
+  assert.equal(original.storage_uri, `s3://ranker-originals/${sha256(bytes)}`);
+  assert.deepEqual(await store.get(sha256(bytes)), bytes);
+
   // Capture is raw intake only: no Item, Classification or Score appears.
   assert.equal(db.psql("select (select count(*) from items) + (select count(*) from classifications) + (select count(*) from score_events)"), "0");
 
@@ -136,6 +162,12 @@ test("a capture body that fails the contract schema is answered 400", async () =
     ["not an object", [valid]],
     ["invalid JSON", "{not json"],
     ["content not base64", { ...valid, content_base64: "@@not base64@@" }],
+    // Names of Object.prototype members are not properties of the schema.
+    ["inherited name toString", { ...valid, toString: "x" }],
+    ["inherited name constructor", { ...valid, constructor: {} }],
+    ["inherited name hasOwnProperty in source", { ...valid, source: { ...valid.source, hasOwnProperty: 1 } }],
+    ["__proto__ property", JSON.stringify(valid).replace(/^\{/, '{"__proto__":{},')],
+    ["source_url not http", { source_url: "file:///etc/passwd", source: valid.source, captured_by: valid.captured_by }],
   ];
   for (const [name, body] of bad) {
     const res = await capture(body);
@@ -150,6 +182,42 @@ test("a capture body that fails the contract schema is answered 400", async () =
   // A malformed corpus id in the path is a client error too.
   assert.equal((await capture(valid, "not-a-corpus")).status, 400);
   assert.equal(countOriginals(), before, "nothing was stored");
+});
+
+test("a capture by source_url fetches, stores and dedups the bytes", async () => {
+  const bytes = Buffer.from("%PDF-1.7 fetched from the source");
+  served.set("/pdf/2611.01234", { type: "application/pdf; charset=binary", body: bytes });
+  // The contract's default example shape: source_url, no bytes, no media_type.
+  const body = {
+    source_url: `${source}/pdf/2611.01234`,
+    source: { source_kind: "feed", source: "https://export.arxiv.org/rss/cs.AI" },
+    captured_by: "agent:intake-arxiv",
+  };
+  const res = await capture(body);
+  assert.equal(res.status, 201);
+  const original = (await res.json()) as Record<string, unknown>;
+  assert.deepEqual(contracts.registry.validate(original, schemaUri("original.schema.json")), []);
+  assert.equal(original.content_hash, sha256(bytes));
+  assert.equal(original.byte_size, bytes.byteLength);
+  assert.equal(original.media_type, "application/pdf");
+  assert.deepEqual(await store.get(sha256(bytes)), bytes);
+  assert.equal(db.psql(`select count(*) from originals where content_hash = '${sha256(bytes)}'`), "1");
+
+  // The same bytes again, by URL or inline, are the same Original.
+  const again = await capture(body);
+  assert.equal(again.status, 200);
+  assert.deepEqual(await again.json(), original);
+  const inline = await capture(request(bytes, { media_type: "application/pdf" }));
+  assert.equal(inline.status, 200);
+  assert.equal(((await inline.json()) as Record<string, unknown>).id, original.id);
+  assert.equal(db.psql(`select count(*) from originals where content_hash = '${sha256(bytes)}'`), "1");
+
+  // A source that cannot be fetched is a client error and stores nothing.
+  const before = countOriginals();
+  const missing = await capture({ ...body, source_url: `${source}/pdf/absent` });
+  assert.equal(missing.status, 400);
+  assert.deepEqual(contracts.registry.validate(await missing.json(), `${openapiUri()}#/components/schemas/Error`), []);
+  assert.equal(countOriginals(), before);
 });
 
 test("a capture into an unknown corpus is answered 404", async () => {

@@ -12,6 +12,8 @@ export interface RankerConfig {
   objectStore: {
     endpoint: string;
     bucket: string;
+    accessKeyId: string;
+    secretAccessKey: string;
   };
 }
 
@@ -34,6 +36,8 @@ export function loadConfig(env: Env = process.env): RankerConfig {
     objectStore: {
       endpoint: env.RANKER_S3_ENDPOINT ?? "http://127.0.0.1:9000",
       bucket: env.RANKER_S3_BUCKET ?? "ranker-originals",
+      accessKeyId: env.RANKER_S3_ACCESS_KEY_ID ?? "ranker",
+      secretAccessKey: env.RANKER_S3_SECRET_ACCESS_KEY ?? "ranker-local-only",
     },
   };
 }

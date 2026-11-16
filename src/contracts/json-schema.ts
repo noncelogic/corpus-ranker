@@ -52,7 +52,7 @@ export function deepEqual(a: unknown, b: unknown): boolean {
   if (Array.isArray(a) && Array.isArray(b)) return a.length === b.length && a.every((x, i) => deepEqual(x, b[i]));
   if (isObject(a) && isObject(b)) {
     const ka = Object.keys(a);
-    return ka.length === Object.keys(b).length && ka.every((k) => k in b && deepEqual(a[k], b[k]));
+    return ka.length === Object.keys(b).length && ka.every((k) => Object.hasOwn(b, k) && deepEqual(a[k], b[k]));
   }
   return false;
 }
@@ -106,7 +106,7 @@ export class SchemaRegistry {
             const ts = Array.isArray(v) ? v : [v];
             for (const t of ts) if (!TYPES.has(t as string)) problems.push(`${at}: unknown type ${String(t)}`);
           }
-          if (k === "format" && !(String(v) in FORMATS)) problems.push(`${at}: unsupported format "${String(v)}"`);
+          if (k === "format" && !Object.hasOwn(FORMATS, String(v))) problems.push(`${at}: unsupported format "${String(v)}"`);
           if (k === "pattern") {
             try { new RegExp(String(v), "u"); } catch { problems.push(`${at}: invalid pattern`); }
           }
@@ -211,11 +211,11 @@ export class SchemaRegistry {
       const n = Object.keys(v).length;
       if (typeof schema.minProperties === "number" && n < schema.minProperties) fail(`must have >= ${schema.minProperties} properties`);
       if (typeof schema.maxProperties === "number" && n > schema.maxProperties) fail(`must have <= ${schema.maxProperties} properties`);
-      for (const r of (schema.required as string[] | undefined) ?? []) if (!(r in v)) fail(`missing required property "${r}"`);
+      for (const r of (schema.required as string[] | undefined) ?? []) if (!Object.hasOwn(v, r)) fail(`missing required property "${r}"`);
       const props = isObject(schema.properties) ? schema.properties : {};
       for (const [k, x] of Object.entries(v)) {
         const p = `${path}/${pointerEscape(k)}`;
-        if (k in props) this.#check(x, props[k] as JsonSchema, base, `${at}/properties/${pointerEscape(k)}`, p, errors);
+        if (Object.hasOwn(props, k)) this.#check(x, props[k] as JsonSchema, base, `${at}/properties/${pointerEscape(k)}`, p, errors);
         else if (schema.additionalProperties !== undefined) {
           if (schema.additionalProperties === false) errors.push({ instancePath: p, schemaUri: at, message: "unexpected property" });
           else this.#check(x, schema.additionalProperties as JsonSchema, base, `${at}/additionalProperties`, p, errors);

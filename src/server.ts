@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { capture, type ApiResponse } from "./api/capture.ts";
 import { loadConfig, type RankerConfig } from "./config.ts";
 import { psqlClient, type Sql } from "./db/psql.ts";
+import { s3ObjectStore, type ObjectStore } from "./storage/object-store.ts";
 
 export { loadConfig, type RankerConfig };
 
@@ -13,6 +14,8 @@ export interface ServerDeps {
   sql?: Sql;
   /** Clock (default: system time). */
   now?: () => Date;
+  /** Store for captured bytes (default: the S3-compatible store in config.objectStore). */
+  store?: ObjectStore;
 }
 
 const ORIGINALS = /^\/v1\/corpora\/([^/?#]+)\/originals$/;
@@ -29,6 +32,7 @@ function readBody(req: IncomingMessage): Promise<string> {
 export function createServer(config: RankerConfig, deps: ServerDeps = {}): Server {
   const sql = deps.sql ?? psqlClient(config.databaseUrl);
   const now = deps.now ?? (() => new Date());
+  const store = deps.store ?? s3ObjectStore(config.objectStore);
 
   const route = async (req: IncomingMessage): Promise<ApiResponse> => {
     const path = new URL(req.url ?? "/", "http://ranker").pathname;
@@ -41,7 +45,7 @@ export function createServer(config: RankerConfig, deps: ServerDeps = {}): Serve
       } catch {
         return { status: 400, body: { error: "invalid_corpus_id", message: "corpus_id is not valid percent-encoding" } };
       }
-      return capture(corpusId, await readBody(req), { sql, now, bucket: config.objectStore.bucket });
+      return capture(corpusId, await readBody(req), { sql, now, store });
     }
     return { status: 404, body: { error: "not_found", message: `${req.method} ${path}` } };
   };

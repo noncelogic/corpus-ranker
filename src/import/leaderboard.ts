@@ -61,7 +61,7 @@ const compareKeys = (a: number[], b: number[]) => {
 };
 
 /** Assigns competition ranks to rows already in leaderboard order, and counts them. */
-function finish(ordered: Omit<LeaderboardRow, "rank">[]): Leaderboard {
+export function rankedLeaderboard(ordered: Omit<LeaderboardRow, "rank">[]): Leaderboard {
   const rows: LeaderboardRow[] = [];
   ordered.forEach((r, i) => {
     const prev = rows[i - 1];
@@ -112,7 +112,7 @@ export function jsonlLeaderboard(files: (Uint8Array | string)[]): Leaderboard {
     scores,
   }));
   rows.sort((a, b) => compareKeys(sortKey(a), sortKey(b)) || (a.arxiv_id < b.arxiv_id ? -1 : a.arxiv_id > b.arxiv_id ? 1 : 0));
-  return finish(rows);
+  return rankedLeaderboard(rows);
 }
 
 /** The leaderboard a Ranked View presents, in the view's own order, keyed by arXiv ID (item id if it has none). */
@@ -127,7 +127,7 @@ export function viewLeaderboard(view: RankedView, kernel: RankerKernel, store: C
       const arxiv_id = store.item(e.item_id)?.identity_keys.arxiv_id ?? e.item_id;
       return { arxiv_id, composite: e.composite, scores };
     });
-  return finish(rows);
+  return rankedLeaderboard(rows);
 }
 
 /** Compares a view's leaderboard against the expected (JSONL-derived) one; every difference is one record. */

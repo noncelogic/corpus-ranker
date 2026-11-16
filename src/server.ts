@@ -4,6 +4,7 @@ import { createServer as createHttpServer, type IncomingMessage, type Server } f
 import { fileURLToPath } from "node:url";
 import { capture, type ApiResponse } from "./api/capture.ts";
 import { score } from "./api/score.ts";
+import { topN } from "./api/top-n.ts";
 import { loadConfig, type RankerConfig } from "./config.ts";
 import { psqlClient, type Sql } from "./db/psql.ts";
 import { s3ObjectStore, type ObjectStore } from "./storage/object-store.ts";
@@ -49,6 +50,7 @@ export function createServer(config: RankerConfig, deps: ServerDeps = {}): Serve
       return capture(corpusId, await readBody(req), { sql, now, store });
     }
     if (req.method === "POST" && path === "/v1/scores") return score(await readBody(req), { sql, now });
+    if (req.method === "POST" && path === "/v1/top-n") return topN(await readBody(req), { sql, now });
     return { status: 404, body: { error: "not_found", message: `${req.method} ${path}` } };
   };
 

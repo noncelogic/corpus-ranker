@@ -71,8 +71,11 @@ test("each ranker database role secret in the rendered manifests comes from a no
     assert.equal(tmpl.data.username, role);
     assert.match(tmpl.data.password, /^\{\{\s*\.password\s*\}\}$/);
     assert.equal(tmpl.metadata?.labels?.["cnpg.io/reload"], "true");
-    // Owned by the ExternalSecret but kept if it is ever deleted, so a
-    // re-sync never silently swaps a role's password underneath CNPG.
+    // Owned by the ExternalSecret: deleting or renaming the ExternalSecret
+    // garbage-collects the Secret, and recreating it generates a new password
+    // (a role password rotation). `deletionPolicy: Retain` covers only
+    // provider-side deletion (ESO ownership-deletion-policy guide); it does
+    // not keep the Secret when the ExternalSecret is removed.
     assert.equal(es.spec.target.creationPolicy ?? "Owner", "Owner");
     assert.equal(es.spec.target.deletionPolicy ?? "Retain", "Retain");
   }

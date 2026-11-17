@@ -1,4 +1,4 @@
-// CR-D1-SECRETS / CR-D1-SECRETS-OVERLAY acceptance: every secret the rendered ranker API Deployment
+// CR-D1-SECRETS / CR-D1-SECRETS-OVERLAY / CR-D1-SECRETS-WIRE acceptance: every secret the rendered ranker API Deployment
 // reads at boot (secret-backed env vars, envFrom Secrets, secret volumes and
 // its image pull Secret) is materialised by an ExternalSecret that reads the
 // estate OpenBao through the ClusterSecretStore `openbao`, from paths under
@@ -210,8 +210,11 @@ const generatorSource = (spec: Record<string, any>): void => {
 };
 const NON_DB_EXTERNAL_SECRETS = ["ranker-minio-service", "ranker-api-keys", "ranker-ghcr-pull"];
 
-test("every non-database secret environment variable the rendered ranker Deployment reads is sourced from an ExternalSecret under kv/corpus-ranker", () => {
-  assertNonDatabaseSecretsFromOpenBao(renderObjects());
+test("every non-database secret environment variable the rendered ranker Deployment reads is sourced from an ExternalSecret under kv/corpus-ranker, and RANKER_DATABASE_URL only from the non-refreshing Password generator", () => {
+  const rendered = renderObjects();
+  // Allowed: every other secret from kv/corpus-ranker, and RANKER_DATABASE_URL from the Password generator.
+  assertNonDatabaseSecretsFromOpenBao(rendered);
+  assertOnlyDatabaseUrlGenerated(rendered);
 
   // The rule bites: a generator source for any other runtime secret is refused ...
   for (const name of NON_DB_EXTERNAL_SECRETS) {
@@ -244,10 +247,6 @@ test("every non-database secret environment variable the rendered ranker Deploym
       ),
     /looks secret/,
   );
-});
-
-test("RANKER_DATABASE_URL is the only generator-sourced secret and comes from the non-refreshing Password generator", () => {
-  assertOnlyDatabaseUrlGenerated(renderObjects());
 
   // A generator source for any other runtime secret is refused: the exception is RANKER_DATABASE_URL alone.
   for (const name of NON_DB_EXTERNAL_SECRETS) {

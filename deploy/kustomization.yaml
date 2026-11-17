@@ -23,6 +23,9 @@
 # ranker-db-check (dbcheck-job.yaml) logs in with each generated database
 # role secret and fails the sync if a secret is missing or a login is refused.
 # tests/deploy/sync-waves.test.ts holds every reference to this order.
+# The API (wave 8) starts only after every ExternalSecret it reads reports
+# Ready (Argo CD's ExternalSecret health check gates each wave), so it never
+# boots without its secrets; tests/deploy/sync-order.test.ts holds that.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 namespace: corpus-ranker

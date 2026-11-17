@@ -1,0 +1,7 @@
+{
+  "bound_service_account_names": ["ranker-minio-provision"],
+  "bound_service_account_namespaces": ["corpus-ranker"],
+  "token_policies": ["corpus-ranker-minio-provision"],
+  "token_ttl": "15m",
+  "token_max_ttl": "15m"
+}

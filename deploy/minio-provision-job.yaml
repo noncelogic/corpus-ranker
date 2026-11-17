@@ -17,8 +17,10 @@
 # with the Job's own service account through the estate's Kubernetes auth
 # method; estate-side, role `corpus-ranker-minio-provision` is bound to this
 # service account in namespace corpus-ranker with read and patch on
-# kv/data/corpus-ranker/minio, nothing else. The script is idempotent: every
-# sync re-runs it, keeping the published credentials.
+# kv/data/corpus-ranker/minio, nothing else (CRANK-140); the role and its
+# policy are recorded in devops/openbao/ (kubernetes-roles/, policies/), and
+# tests/deploy/minio-provision-job.test.ts holds them. The script is idempotent:
+# every sync re-runs it, keeping the published credentials.
 apiVersion: v1
 kind: ServiceAccount
 metadata:

@@ -1,8 +1,9 @@
-# The ranker's own S3-compatible object store (TECH-STACK §5): one MinIO
-# instance on a PVC, holding the `ranker-originals` bucket. As in the local
-# replica (docker-compose.yaml), the container provisions the bucket itself
-# and only reports ready once it exists. Root credentials come from the
-# `ranker-minio` ExternalSecret.
+# The ranker's S3-compatible object store (TECH-STACK §5): the estate's one
+# MinIO deployment for the ranker (TECH-STACK §10, §11), on a PVC. It only
+# serves; the `ranker-originals` bucket, its writer policy and the ranker
+# service user are provisioned by the ranker-minio-provision Job
+# (minio-provision-job.yaml, wave 6). Root credentials come from the
+# `ranker-minio` ExternalSecret and are used by that Job alone.
 apiVersion: v1
 kind: PersistentVolumeClaim
 metadata:
@@ -46,8 +47,6 @@ spec:
         - name: minio
           image: docker.io/pgsty/minio:RELEASE.2026-08-04T00-00-00Z@sha256:b6bfe7239bfc83fb90d31612d9704d86039dd714f7904b3f1ad68f211e602372
           env:
-            - name: RANKER_BUCKET
-              value: ranker-originals
             - name: MINIO_ROOT_USER
               valueFrom:
                 secretKeyRef:
@@ -58,26 +57,15 @@ spec:
                 secretKeyRef:
                   name: ranker-minio
                   key: MINIO_ROOT_PASSWORD
-            - name: MC_CONFIG_DIR
-              value: /tmp/mc
-          command: ["sh", "-c"]
-          args:
-            - |
-              rm -f /tmp/provisioned
-              minio server /data --address :9000 --console-address :9001 &
-              pid=$!
-              trap 'kill -TERM $pid' TERM INT
-              until mc ready local >/dev/null 2>&1; do sleep 1; done
-              mc alias set ranker http://127.0.0.1:9000 "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" >/dev/null
-              mc mb --ignore-existing "ranker/$RANKER_BUCKET"
-              touch /tmp/provisioned
-              wait $pid
+          command: ["minio"]
+          args: ["server", "/data", "--address", ":9000", "--console-address", ":9001"]
           ports:
             - name: s3
               containerPort: 9000
           readinessProbe:
-            exec:
-              command: ["sh", "-c", "test -f /tmp/provisioned"]
+            httpGet:
+              path: /minio/health/ready
+              port: s3
             periodSeconds: 5
           livenessProbe:
             httpGet:

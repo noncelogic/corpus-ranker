@@ -1,0 +1,195 @@
+# Provisions the ranker's bucket on the estate MinIO (TECH-STACK §5, §10, §11:
+# the one MinIO deployment, minio.yaml): an Argo CD Sync hook in wave 6, once
+# MinIO (wave 5) is up. deploy/minio/provision.sh, run one step per container:
+#
+#   credentials  reads the ranker service user's credentials from OpenBao
+#                (kv/corpus-ranker/minio), or generates them on the first run;
+#   bucket       creates the content-addressed `ranker-originals` bucket (one
+#                bucket per system, objects keyed by SHA-256), refuses anonymous
+#                access, and attaches the writer policy (minio/writer-policy.json)
+#                to the ranker service user alone: the bucket's only writer, as
+#                the credentials decision CRANK-57 (CR-D1-DEC-MINIO) grants;
+#   publish      patches that user's credentials into kv/corpus-ranker/minio
+#                (TECH-STACK §9), from where the ranker-minio-service
+#                ExternalSecret (wave 7) syncs them for the API (wave 8).
+#
+# Only the bucket step holds the MinIO root credentials. OpenBao is reached
+# with the Job's own service account through the estate's Kubernetes auth
+# method; estate-side, role `corpus-ranker-minio-provision` is bound to this
+# service account in namespace corpus-ranker with read and patch on
+# kv/data/corpus-ranker/minio, nothing else. The script is idempotent: every
+# sync re-runs it, keeping the published credentials.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ranker-minio-provision
+  annotations:
+    argocd.argoproj.io/sync-wave: "2"
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ranker-minio-provision
+  annotations:
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/sync-wave: "6"
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 900
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ranker-minio-provision
+    spec:
+      restartPolicy: Never
+      serviceAccountName: ranker-minio-provision
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: credentials
+          image: docker.io/openbao/openbao:2.4.1@sha256:597f62847dd382382056a1d6704d50465908c2040038c4611832a23269a67112
+          command: ["sh", "/scripts/provision.sh", "credentials"]
+          env:
+            - name: BAO_ADDR
+              value: http://openbao.openbao.svc.cluster.local:8200
+            - name: BAO_K8S_AUTH_MOUNT
+              value: kubernetes
+            - name: BAO_K8S_AUTH_ROLE
+              value: corpus-ranker-minio-provision
+            - name: BAO_KV_MOUNT
+              value: kv
+            - name: BAO_KV_PATH
+              value: corpus-ranker/minio
+            - name: RANKER_SERVICE_USER
+              value: ranker-service
+            - name: PROVISION_WORK_DIR
+              value: /work
+            - name: HOME
+              value: /tmp
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+            - name: work
+              mountPath: /work
+            - name: tmp
+              mountPath: /tmp
+        - name: bucket
+          image: docker.io/pgsty/minio:RELEASE.2026-08-04T00-00-00Z@sha256:b6bfe7239bfc83fb90d31612d9704d86039dd714f7904b3f1ad68f211e602372
+          command: ["sh", "/scripts/provision.sh", "bucket"]
+          env:
+            - name: MINIO_ENDPOINT
+              value: http://ranker-minio:9000
+            - name: MINIO_WAIT_SECONDS
+              value: "300"
+            - name: RANKER_BUCKET
+              value: ranker-originals
+            - name: RANKER_SERVICE_USER
+              value: ranker-service
+            - name: RANKER_WRITER_POLICY
+              value: ranker-originals-writer
+            - name: RANKER_WRITER_POLICY_FILE
+              value: /scripts/writer-policy.json
+            - name: PROVISION_WORK_DIR
+              value: /work
+            - name: MC_CONFIG_DIR
+              value: /tmp/mc
+            - name: MINIO_ROOT_USER
+              valueFrom:
+                secretKeyRef:
+                  name: ranker-minio
+                  key: MINIO_ROOT_USER
+            - name: MINIO_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ranker-minio
+                  key: MINIO_ROOT_PASSWORD
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+            - name: work
+              mountPath: /work
+            - name: tmp
+              mountPath: /tmp
+      containers:
+        - name: publish
+          image: docker.io/openbao/openbao:2.4.1@sha256:597f62847dd382382056a1d6704d50465908c2040038c4611832a23269a67112
+          command: ["sh", "/scripts/provision.sh", "publish"]
+          env:
+            - name: BAO_ADDR
+              value: http://openbao.openbao.svc.cluster.local:8200
+            - name: BAO_K8S_AUTH_MOUNT
+              value: kubernetes
+            - name: BAO_K8S_AUTH_ROLE
+              value: corpus-ranker-minio-provision
+            - name: BAO_KV_MOUNT
+              value: kv
+            - name: BAO_KV_PATH
+              value: corpus-ranker/minio
+            - name: RANKER_SERVICE_USER
+              value: ranker-service
+            - name: PROVISION_WORK_DIR
+              value: /work
+            - name: HOME
+              value: /tmp
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+            - name: work
+              mountPath: /work
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: scripts
+          configMap:
+            name: ranker-minio-provision
+        # Holds the generated credentials between the steps; memory-backed,
+        # gone with the pod.
+        - name: work
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 16Mi

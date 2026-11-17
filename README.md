@@ -20,6 +20,9 @@ Requirements: Node.js 24+, Docker with the Compose plugin.
 npm ci                 # install (TypeScript toolchain only)
 npm run build          # compile the ranker service skeleton to dist/
 npm start              # run it; GET /healthz answers {"status":"ok","service":"ranker"}
+                       # it refuses to start without RANKER_API_KEYS_DIR (one file per
+                       # principal holding its API key) and RANKER_S3_ACCESS_KEY_ID /
+                       # RANKER_S3_SECRET_ACCESS_KEY
 npm run typecheck      # tsc, strict
 npm run lint           # tsc with unused-code checks
 npm test               # full suite (node:test); needs Docker for the replica test

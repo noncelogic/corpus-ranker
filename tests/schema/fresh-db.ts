@@ -7,6 +7,7 @@ import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from "node:c
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { listMigrations } from "../../src/db/migrations.ts";
+import { composeProjectName } from "./project-name.ts";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const composeFile = resolve(repoRoot, "docker-compose.yaml");
@@ -47,7 +48,7 @@ export interface FreshDbOptions {
 }
 
 export async function freshDatabase(t: TestContext, options: FreshDbOptions = {}): Promise<FreshDb> {
-  const project = `crschema${process.pid}${Date.now() % 100000}`;
+  const project = composeProjectName("crschema");
   const env = { ...process.env, RANKER_PG_PORT: "0", RANKER_MINIO_PORT: "0", RANKER_MINIO_CONSOLE_PORT: "0" };
   const compose = (args: string[], input?: string): string => {
     try {

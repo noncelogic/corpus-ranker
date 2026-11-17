@@ -2,7 +2,8 @@
 // sync waves so that one full sync of an empty namespace applies every
 // prerequisite before the resource that consumes it:
 //   Namespace -> password generators -> ExternalSecrets, ConfigMaps
-//   -> CNPG cluster (and database) -> ranker workloads.
+//   -> CNPG cluster (and database) -> ranker workloads, with the MinIO
+//   service user's ExternalSecret after the Job that provisions that user.
 //
 // Argo CD orders a sync by phase (PreSync, Sync, PostSync) and, within a
 // phase, by the `argocd.argoproj.io/sync-wave` annotation; a later wave only
@@ -140,8 +141,13 @@ test("the waves follow the deployment order: namespace, secrets and config, data
     return ws;
   };
   const ns = waveOf((o) => o.kind === "Namespace", "Namespace");
+  // The one exception: the ExternalSecret syncing what the MinIO
+  // provisioning Job publishes to OpenBao must follow that Job, which follows
+  // MinIO (tests/deploy/object-store-manifests.test.ts).
+  const provisioned = (o: K8sObject): boolean => o.kind === "ExternalSecret" && o.metadata.name === "ranker-minio-service";
   const prereqs = waveOf(
-    (o) => o.kind === "ExternalSecret" || o.kind === "ConfigMap" || o.apiVersion.startsWith("generators.external-secrets.io/"),
+    (o) =>
+      (o.kind === "ExternalSecret" && !provisioned(o)) || o.kind === "ConfigMap" || o.apiVersion.startsWith("generators.external-secrets.io/"),
     "secret/config prerequisites",
   );
   const db = waveOf(isCnpg, "CNPG resources");
@@ -153,4 +159,7 @@ test("the waves follow the deployment order: namespace, secrets and config, data
   assert.ok(Math.max(...ns) < Math.min(...prereqs), "the namespace comes first");
   assert.ok(Math.max(...prereqs) < Math.min(...db), "secrets and ConfigMaps precede the database");
   assert.ok(Math.max(...db) < Math.min(...workloads), "the database precedes the ranker workloads");
+  const [published] = waveOf(provisioned, "ExternalSecret ranker-minio-service");
+  const [provisioner] = waveOf((o) => o.kind === "Job" && o.metadata.name === "ranker-minio-provision", "MinIO provisioning Job");
+  assert.ok(provisioner! < published!, "the MinIO provisioning Job publishes before its ExternalSecret syncs");
 });

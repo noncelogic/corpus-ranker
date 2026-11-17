@@ -1,6 +1,6 @@
 # Corpus Ranker on aks-obs-01 (TECH-STACK §10): one namespace, the ranker's
-# own CNPG Postgres cluster (pgvector) with its migration Job, the
-# MinIO bucket, the API, and ExternalSecrets: API keys and MinIO credentials
+# own CNPG Postgres cluster (pgvector) with its migration Job, MinIO with
+# the Job provisioning its bucket and writer, the API, and ExternalSecrets: API keys and MinIO credentials
 # from the estate OpenBao ClusterSecretStore, database passwords generated in-cluster.
 #
 # Manifests only. No CI step applies these; rollout is estate-side GitOps
@@ -14,11 +14,18 @@
 #   2  the ExternalSecrets (one draws on the generator) and ConfigMaps
 #   3  the CNPG Cluster (ranker-db)
 #   4  the migration Job (a Sync hook; migrate-job.yaml)
-#   5  the ranker workloads: MinIO and the API
+#   5  MinIO
+#   6  the MinIO provisioning Job (a Sync hook; minio-provision-job.yaml):
+#      the bucket, its only writer, that writer's credentials to OpenBao
+#   7  the ExternalSecret syncing those credentials (ranker-minio-service)
+#   8  the API
 # then, after every wave is synced and healthy, the PostSync hook Job
 # ranker-db-check (dbcheck-job.yaml) logs in with each generated database
 # role secret and fails the sync if a secret is missing or a login is refused.
 # tests/deploy/sync-waves.test.ts holds every reference to this order.
+# The API (wave 8) starts only after every ExternalSecret it reads reports
+# Ready (Argo CD's ExternalSecret health check gates each wave), so it never
+# boots without its secrets; tests/deploy/sync-order.test.ts holds that.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 namespace: corpus-ranker
@@ -32,6 +39,7 @@ resources:
   - database.yaml
   - migrate-job.yaml
   - minio.yaml
+  - minio-provision-job.yaml
   - api.yaml
   - dbcheck-job.yaml
 # CNPG bootstrap SQL and the migration script, kept as plain files so the
@@ -55,6 +63,15 @@ configMapGenerator:
   - name: ranker-db-check
     files:
       - db/dbcheck.sh
+    options:
+      disableNameSuffixHash: true
+      annotations:
+        argocd.argoproj.io/sync-wave: "2"
+  # The MinIO provisioning script and the bucket's writer policy (minio-provision-job.yaml).
+  - name: ranker-minio-provision
+    files:
+      - minio/provision.sh
+      - minio/writer-policy.json
     options:
       disableNameSuffixHash: true
       annotations:

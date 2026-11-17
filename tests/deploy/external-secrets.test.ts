@@ -307,3 +307,72 @@ test("deploy/openbao/generate-api-keys.sh writes one fresh key per principal to 
   assert.doesNotMatch(text, /set -[a-z]*x|set -o xtrace/);
   execFileSync("sh", ["-n", script]);
 });
+
+// CR-D1-PULL-D2 acceptance: the ranker's own pull-only GHCR credential
+// (registry-credential-per-product; Rule: policies/placement-defaults.yaml#credentials)
+// lives at kv/corpus-ranker/ghcr-pull, written by the DevOps route with
+// deploy/openbao/store-ghcr-pull.sh (never echoed, presence checked by name
+// only), and the estate External Secrets role reads that one exact path,
+// read-only, through deploy/openbao/external-secrets-ghcr-pull.hcl.
+test("the ranker's image pull secret is an ExternalSecret sourced from kv/corpus-ranker/ghcr-pull", (t) => {
+  const objs = renderObjects();
+  const api = find(objs, "Deployment", "ranker-api");
+  const pullSecrets = ((api.spec.template.spec.imagePullSecrets ?? []) as Array<{ name: string }>).map((s) => s.name);
+  assert.deepEqual(pullSecrets, ["ranker-ghcr-pull"], "the API pulls with the ranker's own pull secret only");
+  const es = externalSecretFor(objs, "ranker-ghcr-pull");
+  assertFromOpenBao(es);
+  assert.equal(es.spec.target.template?.type, "kubernetes.io/dockerconfigjson");
+  const keys = new Set((es.spec.data as Array<{ remoteRef: { key: string } }>).map((d) => d.remoteRef.key));
+  assert.deepEqual([...keys], ["corpus-ranker/ghcr-pull"], "the pull secret reads kv/corpus-ranker/ghcr-pull and nothing else");
+
+  // The estate External Secrets role: one exact path, read-only, no wildcard, no metadata.
+  const policy = readFileSync(resolve(repoRoot, "deploy", "openbao", "external-secrets-ghcr-pull.hcl"), "utf8").replace(/#.*$/gm, "");
+  const stanzas = [...policy.matchAll(/path\s+"([^"]+)"\s*\{\s*capabilities\s*=\s*\[([^\]]*)\]\s*\}/g)].map((m) => ({
+    path: m[1],
+    caps: m[2]!.split(",").map((c) => c.trim().replace(/"/g, "")).filter(Boolean),
+  }));
+  assert.deepEqual(stanzas, [{ path: "kv/data/corpus-ranker/ghcr-pull", caps: ["read"] }], "the ESO role reads exactly kv/corpus-ranker/ghcr-pull, read-only");
+  assert.equal((policy.match(/\bpath\b/g) ?? []).length, 1, "the policy grants no other path");
+  assert.doesNotMatch(policy, /[*+]/, "no wildcard grants");
+
+  // The DevOps route stores it: token from stdin, never echoed, never overwriting.
+  const script = resolve(repoRoot, "deploy", "openbao", "store-ghcr-pull.sh");
+  const bin = mkdtempSync(join(tmpdir(), "fake-bao-"));
+  t.after(() => rmSync(bin, { recursive: true, force: true }));
+  // A stand-in `bao` logging each call; `kv metadata get` succeeds unless FAKE_BAO_ABSENT is set.
+  writeFileSync(
+    join(bin, "bao"),
+    `#!/bin/sh\necho "$*" >> "${bin}/calls"\ncase "$2" in put) cat > "${bin}/stdin" ;; esac\necho "== Secret Path ==" ; echo "kv/data/corpus-ranker/ghcr-pull"\nif [ "$2" = metadata ] && [ -n "\${FAKE_BAO_ABSENT:-}" ]; then exit 2; fi\nexit "\${FAKE_BAO_EXIT:-0}"\n`,
+  );
+  chmodSync(join(bin, "bao"), 0o755);
+  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}` };
+  const token = "ghp_" + "Z".repeat(36);
+
+  const run = spawnSync(script, ["store", "noncelogic-ranker-pull"], { env, input: `${token}\n`, encoding: "utf8" });
+  assert.equal(run.status, 0, run.stderr);
+  const calls = readFileSync(join(bin, "calls"), "utf8").trim().split("\n");
+  assert.deepEqual(calls, ["kv put -mount=kv -cas=0 corpus-ranker/ghcr-pull -", "kv metadata get -mount=kv corpus-ranker/ghcr-pull"]);
+  assert.deepEqual(JSON.parse(readFileSync(join(bin, "stdin"), "utf8")), { username: "noncelogic-ranker-pull", token });
+  assert.ok(!run.stdout.includes(token) && !run.stderr.includes(token), "the script echoed the token");
+  assert.ok(!calls.join(" ").includes(token), "the token went on argv");
+  assert.doesNotMatch(run.stdout + run.stderr, /Secret Path/, "the bao CLI's output is not passed through");
+  assert.match(run.stderr, /present: kv\/corpus-ranker\/ghcr-pull/);
+
+  // Presence is checked by name (metadata) only, never by reading the value.
+  rmSync(join(bin, "calls"));
+  const check = spawnSync(script, ["check"], { env, encoding: "utf8" });
+  assert.equal(check.status, 0, check.stderr);
+  assert.deepEqual(readFileSync(join(bin, "calls"), "utf8").trim().split("\n"), ["kv metadata get -mount=kv corpus-ranker/ghcr-pull"]);
+  assert.notEqual(spawnSync(script, ["check"], { env: { ...env, FAKE_BAO_ABSENT: "1" }, encoding: "utf8" }).status, 0, "an absent credential must fail the check");
+
+  // Refusals: no/odd user, empty or malformed token, a failed write.
+  for (const [args, input] of [[["store"], `${token}\n`], [["store", "Bad User"], `${token}\n`], [["store", "u"], ""], [["store", "u"], "not a token\n"], [["bogus"], ""]] as const) {
+    assert.notEqual(spawnSync(script, [...args], { env, input, encoding: "utf8" }).status, 0, `accepted ${JSON.stringify(args)}`);
+  }
+  assert.notEqual(spawnSync(script, ["store", "u"], { env: { ...env, FAKE_BAO_EXIT: "2" }, input: `${token}\n`, encoding: "utf8" }).status, 0);
+
+  const text = readFileSync(script, "utf8");
+  assert.match(text, /^#!\/bin\/sh\n/);
+  assert.doesNotMatch(text, /set -[a-z]*x|set -o xtrace/);
+  execFileSync("sh", ["-n", script]);
+});

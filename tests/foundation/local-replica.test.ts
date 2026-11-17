@@ -12,6 +12,7 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { composeProjectName } from "../schema/project-name.ts";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const composeFile = resolve(repoRoot, "docker-compose.yaml");
@@ -47,7 +48,7 @@ function assertPostgresHealthcheckGatesOnInitializedRanker(): void {
 test("compose up --wait returns only when the ranker database answers a TCP query and pg_extension lists vector", { timeout: 600_000 }, async (t) => {
   assertPostgresHealthcheckGatesOnInitializedRanker();
 
-  const project = `crreplica${process.pid}${Date.now() % 100000}`;
+  const project = composeProjectName("crreplica");
   const env = {
     ...process.env,
     // 0 = Docker picks a free host port when it binds; no pre-probe race.

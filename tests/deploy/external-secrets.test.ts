@@ -413,12 +413,12 @@ async function assertSinglePathPolicy(t: TestContext, policyName: string, path: 
   assert.equal(strip(bao.root("kv", "get", "-format=json", "-mount=kv", path)), strip(before), "the refused writes changed nothing");
 }
 
-test("external-secrets-corpus-ranker reads kv/corpus-ranker/api-keys only and is refused kv/corpus-ranker/minio", { timeout: 300_000 }, async (t) => {
+test("the api-keys policy grants only read on the api-keys custody path and refuses the MinIO path", { timeout: 300_000 }, async (t) => {
   assertExternalSecretsRead(renderObjects(), ["ranker-api-keys"], "corpus-ranker/api-keys");
   await assertSinglePathPolicy(t, "external-secrets-corpus-ranker", "corpus-ranker/api-keys");
 });
 
-test("external-secrets-corpus-ranker-minio reads kv/corpus-ranker/minio only and is refused kv/corpus-ranker/api-keys", { timeout: 300_000 }, async (t) => {
+test("the MinIO policy grants only read on the MinIO custody path and refuses the api-keys path", { timeout: 300_000 }, async (t) => {
   assertExternalSecretsRead(renderObjects(), ["ranker-minio", "ranker-minio-service"], "corpus-ranker/minio");
   await assertSinglePathPolicy(t, "external-secrets-corpus-ranker-minio", "corpus-ranker/minio");
 });

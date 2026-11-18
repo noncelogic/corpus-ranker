@@ -9,8 +9,8 @@
 // is refused. Nothing secret is rendered from git.
 //
 // The API keys themselves are generated into kv/corpus-ranker/api-keys by
-// deploy/openbao/generate-api-keys.sh, which never prints them
-// (tests/deploy/generate-api-keys.test.ts).
+// the ranker-api-keys-generate Sync hook Job (deploy/api-keys/generate.sh),
+// which never prints them (tests/deploy/api-keys-job.test.ts).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";

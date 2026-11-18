@@ -17,7 +17,7 @@
 // (Rule: policies/placement-defaults.yaml#estate credential_writeback).
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -196,8 +196,11 @@ async function loadedOpenBao(t: TestContext) {
     docker(["rm", "-f", filler]);
   }
 
-  /** Run the Job's container as written (image, command, env, user, read-only root), with `token` for the login. */
-  const runJob = (): { code: number; output: string } => {
+  /**
+   * Run the Job's container as written (image, command, env, user, read-only root), with `token` for the login,
+   * or `command` in its place. Returns stdout and stderr apart, on success as on failure: the pod log carries both.
+   */
+  const runJob = (command: string[] = c.command): { code: number; stdout: string; stderr: string; output: string } => {
     const env = { ...valuesOf(c), BAO_ADDR: `http://${bao}:8200`, BAO_TOKEN: token };
     const scripts = c.volumeMounts!.find((m) => m.name === "scripts")!.mountPath;
     const name = `${id}-job-${randomBytes(2).toString("hex")}`;
@@ -205,15 +208,13 @@ async function loadedOpenBao(t: TestContext) {
     docker(["create", "--name", name, "--network", id, "--user", `${sc.runAsUser}:${sc.runAsGroup}`, "--read-only", "--tmpfs", "/tmp",
       "--mount", `type=volume,src=${scriptsVol},dst=${scripts},readonly`,
       ...Object.entries(env).flatMap(([k, v]) => ["-e", `${k}=${v}`]),
-      "--entrypoint", c.command[0]!, c.image, ...c.command.slice(1)]);
+      "--entrypoint", command[0]!, c.image, ...command.slice(1)]);
     try {
-      try {
-        const output = execFileSync("docker", ["start", "-a", name], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
-        return { code: 0, output };
-      } catch (err) {
-        const e = err as { status?: number; stdout?: string; stderr?: string };
-        return { code: e.status ?? 1, output: `${e.stdout ?? ""}${e.stderr ?? ""}` };
-      }
+      const r = spawnSync("docker", ["start", "-a", name], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+      if (r.error) throw r.error;
+      const stdout = r.stdout ?? "";
+      const stderr = r.stderr ?? "";
+      return { code: r.status ?? 1, stdout, stderr, output: `${stdout}${stderr}` };
     } finally {
       docker(["rm", "-f", name]);
     }
@@ -263,6 +264,37 @@ test("run against OpenBao with the corpus-ranker-api-keys policy alone, the Job 
   assert.notEqual(partial.code, 0, "a key set lacking an authorised principal fails the sync");
   assert.ok(!partial.output.includes("other-key"));
   assert.deepEqual(JSON.parse(root("kv", "get", "-format=json", "-mount=kv", KV_PATH)).data.data, { someone: "other-key" });
+});
+
+test("a successful key-generation run prints no key material on stdout or stderr", { timeout: 600_000 }, async (t) => {
+  const { root, runJob } = await loadedOpenBao(t);
+
+  // The capture sees both streams the pod log carries: a probe in the Job's
+  // own container writing to each comes back on the matching one.
+  const probe = runJob(["sh", "-c", "echo probe-out; echo probe-err >&2"]);
+  assert.equal(probe.code, 0, probe.output);
+  assert.match(probe.stdout, /probe-out/);
+  assert.match(probe.stderr, /probe-err/, "the Job's stderr is captured");
+
+  const fresh = runJob();
+  assert.equal(fresh.code, 0, fresh.output);
+  assert.match(fresh.stdout, /wrote 1 API keys/);
+  const keys = JSON.parse(root("kv", "get", "-format=json", "-mount=kv", KV_PATH)).data.data as Record<string, string>;
+  assert.deepEqual(Object.keys(keys).sort(), AUTHORISED);
+
+  const kept = runJob();
+  assert.equal(kept.code, 0, kept.output);
+  assert.match(kept.stdout, /kept/i);
+
+  for (const [run, r] of [["a first sync", fresh], ["a re-sync", kept]] as const) {
+    for (const [stream, text] of [["stdout", r.stdout], ["stderr", r.stderr]] as const) {
+      for (const [principal, key] of Object.entries(keys)) {
+        assert.ok(!text.includes(key), `${run} printed ${principal}'s API key on ${stream}`);
+        assert.ok(!text.includes(key.slice(0, 16)) && !text.includes(key.slice(-16)), `${run} printed part of ${principal}'s API key on ${stream}`);
+      }
+      assert.doesNotMatch(text, /[0-9a-f]{32}/i, `${run} printed hex key material on ${stream}`);
+    }
+  }
 });
 
 test("the corpus-ranker-api-keys policy can neither update, delete, list nor read metadata on kv/corpus-ranker/api-keys, nor touch any other path", { timeout: 600_000 }, async (t) => {

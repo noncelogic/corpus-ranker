@@ -18,6 +18,17 @@ bao policy write corpus-ranker-api-keys devops/openbao/policies/corpus-ranker-ap
 bao write auth/kubernetes/role/corpus-ranker-api-keys @devops/openbao/kubernetes-roles/corpus-ranker-api-keys.json
 ```
 
+After applying, read the API key Job's grant back and check it is exactly the
+declared one (exit 1 names each difference: an added capability, another
+path, another bound service account or namespace, an extra attached policy,
+an absent policy or role; it reads names and policy text only):
+
+```sh
+node deploy/openbao/check-api-keys-grant.ts
+```
+
+`tests/deploy/openbao-writeback-readback.test.ts` holds the checker.
+
 Each role's token lives as long as its Job's `activeDeadlineSeconds` (15
 minutes for the MinIO provisioning Job, 5 for the API key Job).
 `tests/deploy/minio-provision-job.test.ts` and `tests/deploy/api-keys-job.test.ts`

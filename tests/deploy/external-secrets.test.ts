@@ -11,7 +11,7 @@
 // The API keys themselves are generated into kv/corpus-ranker/api-keys by
 // the ranker-api-keys-generate Sync hook Job (deploy/api-keys/generate.sh),
 // which never prints them (tests/deploy/api-keys-job.test.ts).
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -338,15 +338,17 @@ test("the ranker's image pull secret is an ExternalSecret sourced from kv/corpus
   execFileSync("sh", ["-n", script]);
 });
 
-// CR-D1-SECRETS-ROLLOUT acceptance (CRANK-140; Rule: policies/placement-defaults.yaml#estate
-// secrets): the API key and object-store ExternalSecrets read only
-// kv/corpus-ranker/api-keys and kv/corpus-ranker/minio, and the estate External
-// Secrets role's policy for them, deploy/openbao/external-secrets-corpus-ranker.hcl,
-// grants exactly those two paths, read-only, with no wildcard. Loaded into a
-// throwaway OpenBao, a token holding that policy alone reads both and nothing else.
-const ESO_POLICY = "external-secrets-corpus-ranker";
-const API_KEY_AND_OBJECT_STORE = ["ranker-api-keys", "ranker-minio", "ranker-minio-service"];
-const ESO_PATHS = ["corpus-ranker/api-keys", "corpus-ranker/minio"];
+// CR-D1-SECRETS-ROLLOUT / CR-M3-D2d acceptance (CRANK-140; Rule: policies/placement-defaults.yaml#estate
+// secrets): the API key ExternalSecret reads only kv/corpus-ranker/api-keys and
+// the object-store ExternalSecrets read only kv/corpus-ranker/minio. The estate
+// External Secrets role holds one policy per custody path:
+// deploy/openbao/external-secrets-corpus-ranker.hcl grants read on
+// kv/corpus-ranker/api-keys alone and
+// deploy/openbao/external-secrets-corpus-ranker-minio.hcl read on
+// kv/corpus-ranker/minio alone, each one exact path, no wildcard. Each file,
+// loaded alone into a throwaway OpenBao, reads its path and nothing else.
+const CUSTODY_PATHS = ["corpus-ranker/api-keys", "corpus-ranker/minio"] as const;
+type CustodyPath = (typeof CUSTODY_PATHS)[number];
 
 /** Every OpenBao path an ExternalSecret reads. */
 const remotePaths = (es: K8sObject): string[] => [
@@ -354,63 +356,69 @@ const remotePaths = (es: K8sObject): string[] => [
   ...(es.spec.dataFrom ?? []).map((d: { extract?: { key?: string } }) => d.extract?.key),
 ];
 
-test("the API key and object-store ExternalSecrets read only kv/corpus-ranker/api-keys and kv/corpus-ranker/minio, and the External Secrets role's policy grants exactly those, read-only", { timeout: 300_000 }, async (t) => {
-  const objs = renderObjects();
-  const read = new Set<string>();
-  for (const name of API_KEY_AND_OBJECT_STORE) {
+/** Assert the ExternalSecrets read exactly `path` from OpenBao, by name. */
+function assertExternalSecretsRead(objs: K8sObject[], names: string[], path: CustodyPath): void {
+  for (const name of names) {
     const es = externalSecretFor(objs, name);
     assertFromOpenBao(es);
-    for (const d of es.spec.dataFrom ?? []) assert.equal(d.find, undefined, `${name} must not search OpenBao`);
-    for (const path of remotePaths(es)) {
-      assert.ok(ESO_PATHS.includes(path), `ExternalSecret/${name} reads ${path}, not kv/corpus-ranker/api-keys or kv/corpus-ranker/minio`);
-      read.add(path);
-    }
+    assert.deepEqual(new Set(remotePaths(es)), new Set([path]), `ExternalSecret/${name} must read kv/${path} and nothing else`);
   }
-  assert.deepEqual([...read].sort(), ESO_PATHS, "both paths are read");
-  assert.deepEqual(remotePaths(externalSecretFor(objs, "ranker-api-keys")), ["corpus-ranker/api-keys"]);
-  assert.deepEqual(new Set([...remotePaths(externalSecretFor(objs, "ranker-minio")), ...remotePaths(externalSecretFor(objs, "ranker-minio-service"))]), new Set(["corpus-ranker/minio"]));
+}
 
-  // The recorded policy: two exact data paths, read only, nothing else.
-  const policyFile = resolve(repoRoot, "deploy", "openbao", `${ESO_POLICY}.hcl`);
+/**
+ * Assert `deploy/openbao/<policyName>.hcl` grants read on kv/<path> alone, and
+ * that a token holding that policy alone (plus OpenBao's `default`) reads it
+ * while the other custody path, writes, patch, delete, list and metadata are refused.
+ */
+async function assertSinglePathPolicy(t: TestContext, policyName: string, path: CustodyPath): Promise<void> {
+  const other = CUSTODY_PATHS.find((p) => p !== path)!;
+  const policyFile = resolve(repoRoot, "deploy", "openbao", `${policyName}.hcl`);
   const policy = readFileSync(policyFile, "utf8");
-  assert.deepEqual(
-    [...policyPaths(policy)].sort(),
-    ESO_PATHS.map((p) => [`kv/data/${p}`, ["read"]]),
-    "the External Secrets role reads exactly kv/corpus-ranker/api-keys and kv/corpus-ranker/minio, read-only",
-  );
+  assert.deepEqual([...policyPaths(policy)], [[`kv/data/${path}`, ["read"]]], `${policyName} grants read on kv/${path} alone`);
   assert.doesNotMatch(policy.replace(/#.*$/gm, ""), /[*+]/, "no wildcard grants");
 
-  // Live: a token holding that policy alone (plus OpenBao's `default`) reads both paths and nothing else.
   const bao = await startDevOpenBao(t);
   docker(["cp", policyFile, `${bao.name}:/tmp/policy.hcl`]);
-  bao.root("policy", "write", ESO_POLICY, "/tmp/policy.hcl");
+  bao.root("policy", "write", policyName, "/tmp/policy.hcl");
   bao.root("kv", "put", "-mount=kv", "corpus-ranker/api-keys", "joe=api-secret");
   bao.root("kv", "put", "-mount=kv", "corpus-ranker/minio", "root-user=r", "root-password=p", "service-user=s", "service-password=q");
   bao.root("kv", "put", "-mount=kv", "corpus-ranker/ghcr-pull", "username=u", "token=t");
   bao.root("kv", "put", "-mount=kv", "other-product/api-keys", "x=y");
-  const token = JSON.parse(bao.root("token", "create", "-format=json", `-policy=${ESO_POLICY}`)).auth.client_token as string;
+  const before = bao.root("kv", "get", "-format=json", "-mount=kv", path);
+  const token = JSON.parse(bao.root("token", "create", "-format=json", `-policy=${policyName}`)).auth.client_token as string;
 
-  // The reads External Secrets makes for the three ExternalSecrets succeed.
-  for (const path of ESO_PATHS) {
-    const [code, out] = bao.as(token, "kv", "get", "-format=json", "-mount=kv", path);
-    assert.equal(code, 0, `the ESO token must read kv/${path}: ${out}`);
-  }
+  const [code, out] = bao.as(token, "kv", "get", "-format=json", "-mount=kv", path);
+  assert.equal(code, 0, `${policyName} must read kv/${path}: ${out}`);
+
   const refused: string[][] = [
-    ["kv", "put", "-mount=kv", "corpus-ranker/api-keys", "joe=x"],
-    ["kv", "patch", "-mount=kv", "corpus-ranker/api-keys", "joe=x"],
-    ["kv", "patch", "-mount=kv", "corpus-ranker/minio", "service-user=x"],
-    ["kv", "delete", "-mount=kv", "corpus-ranker/minio"],
+    ["kv", "get", "-mount=kv", other],
+    ["kv", "put", "-mount=kv", path, "x=y"],
+    ["kv", "patch", "-mount=kv", path, "x=y"],
+    ["kv", "delete", "-mount=kv", path],
+    ["kv", "put", "-mount=kv", other, "x=y"],
     ["kv", "list", "-mount=kv", "corpus-ranker"],
-    ["kv", "metadata", "get", "-mount=kv", "corpus-ranker/api-keys"],
+    ["kv", "metadata", "get", "-mount=kv", path],
+    ["kv", "metadata", "get", "-mount=kv", other],
     ["kv", "get", "-mount=kv", "corpus-ranker/ghcr-pull"],
-    ["kv", "get", "-mount=kv", "corpus-ranker/api-keys-old"],
+    ["kv", "get", "-mount=kv", `${path}-old`],
     ["kv", "get", "-mount=kv", "other-product/api-keys"],
     ["policy", "list"],
   ];
   for (const args of refused) {
-    const [code, out] = bao.as(token, ...args);
-    assert.notEqual(code, 0, `the ESO token must not: bao ${args.join(" ")}\n${out}`);
-    assert.match(out, /permission denied|403/i, `bao ${args.join(" ")} failed for another reason: ${out}`);
+    const [c, o] = bao.as(token, ...args);
+    assert.notEqual(c, 0, `${policyName} must not: bao ${args.join(" ")}\n${o}`);
+    assert.match(o, /permission denied|403/i, `bao ${args.join(" ")} failed for another reason: ${o}`);
   }
-  assert.equal(bao.root("kv", "get", "-mount=kv", "-field=joe", "corpus-ranker/api-keys").trim(), "api-secret", "the refused writes changed nothing");
+  const strip = (s: string) => JSON.stringify(JSON.parse(s).data);
+  assert.equal(strip(bao.root("kv", "get", "-format=json", "-mount=kv", path)), strip(before), "the refused writes changed nothing");
+}
+
+test("external-secrets-corpus-ranker reads kv/corpus-ranker/api-keys only and is refused kv/corpus-ranker/minio", { timeout: 300_000 }, async (t) => {
+  assertExternalSecretsRead(renderObjects(), ["ranker-api-keys"], "corpus-ranker/api-keys");
+  await assertSinglePathPolicy(t, "external-secrets-corpus-ranker", "corpus-ranker/api-keys");
+});
+
+test("external-secrets-corpus-ranker-minio reads kv/corpus-ranker/minio only and is refused kv/corpus-ranker/api-keys", { timeout: 300_000 }, async (t) => {
+  assertExternalSecretsRead(renderObjects(), ["ranker-minio", "ranker-minio-service"], "corpus-ranker/minio");
+  await assertSinglePathPolicy(t, "external-secrets-corpus-ranker-minio", "corpus-ranker/minio");
 });

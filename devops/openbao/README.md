@@ -18,3 +18,12 @@ bao write auth/kubernetes/role/corpus-ranker-minio-provision @devops/openbao/kub
 The role's token lives 15 minutes, the Job's `activeDeadlineSeconds`.
 `tests/deploy/minio-provision-job.test.ts` loads both files into a throwaway
 OpenBao and runs the Job's steps with the role's policy alone.
+
+The estate External Secrets role (the one the `openbao` ClusterSecretStore
+logs in with) holds two ranker policies, kept beside the scripts that fill
+their paths in `deploy/openbao/`: `external-secrets-corpus-ranker.hcl` (read on
+`kv/corpus-ranker/api-keys` and `kv/corpus-ranker/minio`) and
+`external-secrets-ghcr-pull.hcl` (read on `kv/corpus-ranker/ghcr-pull`). Each
+grant is one exact path, read-only, no wildcard (CRANK-140). The API keys are
+written once, estate-side, by `deploy/openbao/generate-api-keys.sh`, for the
+principals CR-D1-DEC-PRINCIPALS authorises; it never prints a key.

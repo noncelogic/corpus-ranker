@@ -9,7 +9,8 @@
 // is refused. Nothing secret is rendered from git.
 //
 // The API keys themselves are generated into kv/corpus-ranker/api-keys by
-// deploy/openbao/generate-api-keys.sh, which never prints them.
+// deploy/openbao/generate-api-keys.sh, which never prints them
+// (tests/deploy/generate-api-keys.test.ts).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
@@ -17,6 +18,7 @@ import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { renderObjects, repoRoot, type K8sObject } from "./render.ts";
+import { docker, policyPaths, startDevOpenBao } from "./openbao-dev.ts";
 
 const NAMESPACE = "corpus-ranker";
 const OPENBAO_PREFIX = "corpus-ranker/";
@@ -267,47 +269,6 @@ test("every non-database secret environment variable the rendered ranker Deploym
   );
 });
 
-test("deploy/openbao/generate-api-keys.sh writes one fresh key per principal to kv/corpus-ranker/api-keys without echoing any", (t) => {
-  const script = resolve(repoRoot, "deploy", "openbao", "generate-api-keys.sh");
-  const bin = mkdtempSync(join(tmpdir(), "fake-bao-"));
-  t.after(() => rmSync(bin, { recursive: true, force: true }));
-  // A stand-in `bao` that records its arguments and stdin, and prints what the real CLI would.
-  writeFileSync(
-    join(bin, "bao"),
-    `#!/bin/sh\nprintf '%s\\n' "$@" > "${bin}/args"\ncat > "${bin}/stdin"\necho "== Secret Path ==" ; echo "kv/data/corpus-ranker/api-keys"\nexit "\${FAKE_BAO_EXIT:-0}"\n`,
-  );
-  chmodSync(join(bin, "bao"), 0o755);
-  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}` };
-
-  const run = spawnSync(script, ["juno", "hermes", "joe"], { env, encoding: "utf8" });
-  assert.equal(run.status, 0, run.stderr);
-
-  const args = readFileSync(join(bin, "args"), "utf8").trim().split("\n");
-  assert.deepEqual(args, ["kv", "put", "-mount=kv", "-cas=0", "corpus-ranker/api-keys", "-"], "keys go to kv/corpus-ranker/api-keys, never overwriting an existing set");
-  const written = JSON.parse(readFileSync(join(bin, "stdin"), "utf8")) as Record<string, string>;
-  assert.deepEqual(Object.keys(written).sort(), ["hermes", "joe", "juno"]);
-  const keys = Object.values(written);
-  for (const key of keys) assert.match(key, /^[0-9a-f]{64}$/, "each key is 256 random bits, hex");
-  assert.equal(new Set(keys).size, keys.length, "every principal gets its own key");
-  for (const key of keys) {
-    assert.ok(!run.stdout.includes(key) && !run.stderr.includes(key), "the script echoed an API key");
-  }
-  assert.doesNotMatch(run.stdout + run.stderr, /Secret Path/, "the bao CLI's output is not passed through");
-
-  // Bad principal names, duplicates and a failing write are all refusals.
-  for (const bad of [[], ["Juno"], ["../x"], ["juno", "juno"]]) {
-    assert.notEqual(spawnSync(script, bad, { env, encoding: "utf8" }).status, 0, `accepted principals ${JSON.stringify(bad)}`);
-  }
-  const failed = spawnSync(script, ["juno"], { env: { ...env, FAKE_BAO_EXIT: "2" }, encoding: "utf8" });
-  assert.notEqual(failed.status, 0, "a failed OpenBao write must fail the script");
-
-  // The script is POSIX sh and never traces (which would print the keys).
-  const text = readFileSync(script, "utf8");
-  assert.match(text, /^#!\/bin\/sh\n/);
-  assert.doesNotMatch(text, /set -[a-z]*x|set -o xtrace/);
-  execFileSync("sh", ["-n", script]);
-});
-
 // CR-D1-PULL-D2 acceptance: the ranker's own pull-only GHCR credential
 // (registry-credential-per-product; Rule: policies/placement-defaults.yaml#credentials)
 // lives at kv/corpus-ranker/ghcr-pull, written by the DevOps route with
@@ -375,4 +336,81 @@ test("the ranker's image pull secret is an ExternalSecret sourced from kv/corpus
   assert.match(text, /^#!\/bin\/sh\n/);
   assert.doesNotMatch(text, /set -[a-z]*x|set -o xtrace/);
   execFileSync("sh", ["-n", script]);
+});
+
+// CR-D1-SECRETS-ROLLOUT acceptance (CRANK-140; Rule: policies/placement-defaults.yaml#estate
+// secrets): the API key and object-store ExternalSecrets read only
+// kv/corpus-ranker/api-keys and kv/corpus-ranker/minio, and the estate External
+// Secrets role's policy for them, deploy/openbao/external-secrets-corpus-ranker.hcl,
+// grants exactly those two paths, read-only, with no wildcard. Loaded into a
+// throwaway OpenBao, a token holding that policy alone reads both and nothing else.
+const ESO_POLICY = "external-secrets-corpus-ranker";
+const API_KEY_AND_OBJECT_STORE = ["ranker-api-keys", "ranker-minio", "ranker-minio-service"];
+const ESO_PATHS = ["corpus-ranker/api-keys", "corpus-ranker/minio"];
+
+/** Every OpenBao path an ExternalSecret reads. */
+const remotePaths = (es: K8sObject): string[] => [
+  ...(es.spec.data ?? []).map((d: { remoteRef?: { key?: string } }) => d.remoteRef?.key),
+  ...(es.spec.dataFrom ?? []).map((d: { extract?: { key?: string } }) => d.extract?.key),
+];
+
+test("the API key and object-store ExternalSecrets read only kv/corpus-ranker/api-keys and kv/corpus-ranker/minio, and the External Secrets role's policy grants exactly those, read-only", { timeout: 300_000 }, async (t) => {
+  const objs = renderObjects();
+  const read = new Set<string>();
+  for (const name of API_KEY_AND_OBJECT_STORE) {
+    const es = externalSecretFor(objs, name);
+    assertFromOpenBao(es);
+    for (const d of es.spec.dataFrom ?? []) assert.equal(d.find, undefined, `${name} must not search OpenBao`);
+    for (const path of remotePaths(es)) {
+      assert.ok(ESO_PATHS.includes(path), `ExternalSecret/${name} reads ${path}, not kv/corpus-ranker/api-keys or kv/corpus-ranker/minio`);
+      read.add(path);
+    }
+  }
+  assert.deepEqual([...read].sort(), ESO_PATHS, "both paths are read");
+  assert.deepEqual(remotePaths(externalSecretFor(objs, "ranker-api-keys")), ["corpus-ranker/api-keys"]);
+  assert.deepEqual(new Set([...remotePaths(externalSecretFor(objs, "ranker-minio")), ...remotePaths(externalSecretFor(objs, "ranker-minio-service"))]), new Set(["corpus-ranker/minio"]));
+
+  // The recorded policy: two exact data paths, read only, nothing else.
+  const policyFile = resolve(repoRoot, "deploy", "openbao", `${ESO_POLICY}.hcl`);
+  const policy = readFileSync(policyFile, "utf8");
+  assert.deepEqual(
+    [...policyPaths(policy)].sort(),
+    ESO_PATHS.map((p) => [`kv/data/${p}`, ["read"]]),
+    "the External Secrets role reads exactly kv/corpus-ranker/api-keys and kv/corpus-ranker/minio, read-only",
+  );
+  assert.doesNotMatch(policy.replace(/#.*$/gm, ""), /[*+]/, "no wildcard grants");
+
+  // Live: a token holding that policy alone (plus OpenBao's `default`) reads both paths and nothing else.
+  const bao = await startDevOpenBao(t);
+  docker(["cp", policyFile, `${bao.name}:/tmp/policy.hcl`]);
+  bao.root("policy", "write", ESO_POLICY, "/tmp/policy.hcl");
+  bao.root("kv", "put", "-mount=kv", "corpus-ranker/api-keys", "joe=api-secret");
+  bao.root("kv", "put", "-mount=kv", "corpus-ranker/minio", "root-user=r", "root-password=p", "service-user=s", "service-password=q");
+  bao.root("kv", "put", "-mount=kv", "corpus-ranker/ghcr-pull", "username=u", "token=t");
+  bao.root("kv", "put", "-mount=kv", "other-product/api-keys", "x=y");
+  const token = JSON.parse(bao.root("token", "create", "-format=json", `-policy=${ESO_POLICY}`)).auth.client_token as string;
+
+  // The reads External Secrets makes for the three ExternalSecrets succeed.
+  for (const path of ESO_PATHS) {
+    const [code, out] = bao.as(token, "kv", "get", "-format=json", "-mount=kv", path);
+    assert.equal(code, 0, `the ESO token must read kv/${path}: ${out}`);
+  }
+  const refused: string[][] = [
+    ["kv", "put", "-mount=kv", "corpus-ranker/api-keys", "joe=x"],
+    ["kv", "patch", "-mount=kv", "corpus-ranker/api-keys", "joe=x"],
+    ["kv", "patch", "-mount=kv", "corpus-ranker/minio", "service-user=x"],
+    ["kv", "delete", "-mount=kv", "corpus-ranker/minio"],
+    ["kv", "list", "-mount=kv", "corpus-ranker"],
+    ["kv", "metadata", "get", "-mount=kv", "corpus-ranker/api-keys"],
+    ["kv", "get", "-mount=kv", "corpus-ranker/ghcr-pull"],
+    ["kv", "get", "-mount=kv", "corpus-ranker/api-keys-old"],
+    ["kv", "get", "-mount=kv", "other-product/api-keys"],
+    ["policy", "list"],
+  ];
+  for (const args of refused) {
+    const [code, out] = bao.as(token, ...args);
+    assert.notEqual(code, 0, `the ESO token must not: bao ${args.join(" ")}\n${out}`);
+    assert.match(out, /permission denied|403/i, `bao ${args.join(" ")} failed for another reason: ${out}`);
+  }
+  assert.equal(bao.root("kv", "get", "-mount=kv", "-field=joe", "corpus-ranker/api-keys").trim(), "api-secret", "the refused writes changed nothing");
 });

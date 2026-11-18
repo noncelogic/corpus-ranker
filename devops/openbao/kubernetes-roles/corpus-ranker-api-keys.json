@@ -1,0 +1,7 @@
+{
+  "bound_service_account_names": ["ranker-api-keys-generate"],
+  "bound_service_account_namespaces": ["corpus-ranker"],
+  "token_policies": ["corpus-ranker-api-keys"],
+  "token_ttl": "5m",
+  "token_max_ttl": "5m"
+}

@@ -5,7 +5,7 @@
 # role the `openbao` ClusterSecretStore logs in with, beside
 # external-secrets-ghcr-pull.hcl; its readers in this product are the
 # ExternalSecrets `ranker-api-keys` (kv/corpus-ranker/api-keys, written by
-# generate-api-keys.sh), `ranker-minio` and `ranker-minio-service`
+# the ranker-api-keys-generate Job), `ranker-minio` and `ranker-minio-service`
 # (kv/corpus-ranker/minio) in deploy/externalsecrets.yaml.
 # tests/deploy/external-secrets.test.ts loads it into a throwaway OpenBao.
 path "kv/data/corpus-ranker/api-keys" {

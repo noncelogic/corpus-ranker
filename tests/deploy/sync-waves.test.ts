@@ -3,7 +3,8 @@
 // prerequisite before the resource that consumes it:
 //   Namespace -> password generators -> ExternalSecrets, ConfigMaps
 //   -> CNPG cluster (and database) -> ranker workloads, with the MinIO
-//   service user's ExternalSecret after the Job that provisions that user.
+//   service user's and the API keys' ExternalSecrets after the Jobs that
+//   write them to OpenBao.
 //
 // Argo CD orders a sync by phase (PreSync, Sync, PostSync) and, within a
 // phase, by the `argocd.argoproj.io/sync-wave` annotation; a later wave only
@@ -141,10 +142,11 @@ test("the waves follow the deployment order: namespace, secrets and config, data
     return ws;
   };
   const ns = waveOf((o) => o.kind === "Namespace", "Namespace");
-  // The one exception: the ExternalSecret syncing what the MinIO
-  // provisioning Job publishes to OpenBao must follow that Job, which follows
-  // MinIO (tests/deploy/object-store-manifests.test.ts).
-  const provisioned = (o: K8sObject): boolean => o.kind === "ExternalSecret" && o.metadata.name === "ranker-minio-service";
+  // The exceptions: the ExternalSecrets syncing what the MinIO provisioning
+  // Job (tests/deploy/object-store-manifests.test.ts) and the API key Job
+  // (tests/deploy/api-keys-job.test.ts) write to OpenBao must follow them.
+  const writtenBy: Record<string, string> = { "ranker-minio-service": "ranker-minio-provision", "ranker-api-keys": "ranker-api-keys-generate" };
+  const provisioned = (o: K8sObject): boolean => o.kind === "ExternalSecret" && o.metadata.name in writtenBy;
   const prereqs = waveOf(
     (o) =>
       (o.kind === "ExternalSecret" && !provisioned(o)) || o.kind === "ConfigMap" || o.apiVersion.startsWith("generators.external-secrets.io/"),
@@ -159,7 +161,9 @@ test("the waves follow the deployment order: namespace, secrets and config, data
   assert.ok(Math.max(...ns) < Math.min(...prereqs), "the namespace comes first");
   assert.ok(Math.max(...prereqs) < Math.min(...db), "secrets and ConfigMaps precede the database");
   assert.ok(Math.max(...db) < Math.min(...workloads), "the database precedes the ranker workloads");
-  const [published] = waveOf(provisioned, "ExternalSecret ranker-minio-service");
-  const [provisioner] = waveOf((o) => o.kind === "Job" && o.metadata.name === "ranker-minio-provision", "MinIO provisioning Job");
-  assert.ok(provisioner! < published!, "the MinIO provisioning Job publishes before its ExternalSecret syncs");
+  for (const [secret, writer] of Object.entries(writtenBy)) {
+    const [published] = waveOf((o) => o.kind === "ExternalSecret" && o.metadata.name === secret, `ExternalSecret ${secret}`);
+    const [provisioner] = waveOf((o) => o.kind === "Job" && o.metadata.name === writer, `Job ${writer}`);
+    assert.ok(provisioner! < published!, `the Job ${writer} writes to OpenBao before ExternalSecret ${secret} syncs`);
+  }
 });

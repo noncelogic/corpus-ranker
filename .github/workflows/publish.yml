@@ -1,16 +1,21 @@
 name: publish
 
-# Builds the ranker image once per merge to main and publishes it to GHCR as
-# ghcr.io/noncelogic/corpus-ranker:sha-<commit>.
+# Builds the ranker image once per merge to main and publishes it to the
+# estate Azure registry as noncelogicci.azurecr.io/corpus-ranker:sha-<commit>
+# (INTENTS I21: container images move off GitHub, the ranker first).
 #
-# Runs on the owner's self-hosted runners (the passband-ci ARC scale set,
-# labelled [passband-ci, aks, self-hosted]), which hold estate credentials
+# Runs on the ranker's dedicated self-hosted runner (labelled [self-hosted,
+# aks, corpus-ranker-ci]), which holds estate credentials
 # (docs/EXTERNAL-REVIEW.md §1). It is therefore triggered ONLY by pushes to
 # main — never by pull_request, pull_request_target or any event external
-# code can raise — and authenticates with the repository's own GITHUB_TOKEN,
-# scoped to packages: write. Plain docker CLI, no third-party actions.
-# Publishing is the end of the pipeline: rollout of deploy/ is estate-side
-# GitOps, and nothing here contacts a cluster.
+# code can raise. It authenticates with the ranker's own ACR push token
+# (corpus-ranker-push, scoped to repository corpus-ranker only; custodied at
+# kv/corpus-ranker/acr-push; Rule: policies/placement-defaults.yaml#credentials),
+# which the runner mounts read-only at /etc/registry-push as the files
+# registry, username and password. No GitHub token is used for the push, so
+# the job holds no `packages` permission. Plain docker CLI, no third-party
+# actions. Publishing is the end of the pipeline: rollout of deploy/ is
+# estate-side GitOps, and nothing here contacts a cluster.
 on:
   push:
     branches: [main]
@@ -26,13 +31,13 @@ permissions: {}
 
 jobs:
   image:
-    runs-on: [self-hosted, passband-ci]
+    runs-on: [self-hosted, corpus-ranker-ci]
     timeout-minutes: 20
     permissions:
       contents: read
-      packages: write
     env:
-      IMAGE: ghcr.io/noncelogic/corpus-ranker
+      IMAGE: noncelogicci.azurecr.io/corpus-ranker
+      REGISTRY_PUSH_DIR: /etc/registry-push
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
@@ -44,13 +49,20 @@ jobs:
             --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
             -t "${IMAGE}:sha-${GITHUB_SHA}" .
       - name: Publish
-        env:
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          registry="$(cat "${REGISTRY_PUSH_DIR}/registry")"
+          username="$(cat "${REGISTRY_PUSH_DIR}/username")"
+          # The mounted credential must be for the registry IMAGE names, or
+          # the push would go nowhere (or somewhere else).
+          if [ "$registry" != "${IMAGE%%/*}" ]; then
+            echo "push credential is for '${registry}', not ${IMAGE%%/*}" >&2
+            exit 1
+          fi
           # Private docker config per job: no credential outlives this run on
           # the shared self-hosted host.
           export DOCKER_CONFIG="${RUNNER_TEMP}/docker-config"
           mkdir -p "$DOCKER_CONFIG"
-          trap 'docker logout ghcr.io >/dev/null 2>&1 || true; rm -rf "$DOCKER_CONFIG"' EXIT
-          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          trap 'docker logout "$registry" >/dev/null 2>&1 || true; rm -rf "$DOCKER_CONFIG"' EXIT
+          # The password goes to docker on stdin, never on argv or in the log.
+          docker login "$registry" -u "$username" --password-stdin < "${REGISTRY_PUSH_DIR}/password"
           docker push "${IMAGE}:sha-${GITHUB_SHA}"

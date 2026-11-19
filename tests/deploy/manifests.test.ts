@@ -129,7 +129,7 @@ test("kustomize build renders and the Deployment env names match the frozen conf
   assert.match(deployment.text, /name: RANKER_DATABASE_URL\n\s+valueFrom:\n\s+secretKeyRef:\n\s+(?:key: uri\n\s+name: ranker-db-service|name: ranker-db-service\n\s+key: uri)/);
   assert.match(deployment.text, /name: RANKER_S3_ENDPOINT\n\s+value: http:\/\/ranker-minio[.:]/);
   assert.match(deployment.text, /name: RANKER_S3_BUCKET\n\s+value: ranker-originals/);
-  assert.match(deployment.text, /image: ghcr\.io\/noncelogic\/corpus-ranker[:@]/);
+  assert.match(deployment.text, /image: noncelogicci\.azurecr\.io\/corpus-ranker[:@]/);
 });
 
 test("manifests target namespace corpus-ranker with CNPG, MinIO, ExternalSecrets and no ingress", () => {

@@ -38,10 +38,10 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       imagePullSecrets:
-        - name: ranker-ghcr-pull
+        - name: ranker-registry-pull
       initContainers:
         - name: migrations
-          image: ghcr.io/noncelogic/corpus-ranker
+          image: noncelogicci.azurecr.io/corpus-ranker
           command: ["sh", "-c", "cp /app/db/migrations/*.sql /migrations/"]
           securityContext:
             allowPrivilegeEscalation: false

@@ -19,7 +19,7 @@ import { deployDir, findObject, parseYamlDocs, renderObjects, repoRoot, type K8s
 const MIGRATOR = "ranker_migrator";
 const SERVICE = "ranker_service";
 const APP_GRANT_ROLE = "ranker_app";
-const API_IMAGE = "ghcr.io/noncelogic/corpus-ranker";
+const API_IMAGE = "noncelogicci.azurecr.io/corpus-ranker";
 
 interface EnvVar {
   name: string;

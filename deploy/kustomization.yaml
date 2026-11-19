@@ -89,7 +89,7 @@ configMapGenerator:
       annotations:
         argocd.argoproj.io/sync-wave: "2"
 images:
-  # .github/workflows/publish.yml publishes ghcr.io/noncelogic/corpus-ranker:sha-<commit>
+  # .github/workflows/publish.yml publishes noncelogicci.azurecr.io/corpus-ranker:sha-<commit>
   # for every merge. Estate-side GitOps pins the tag (or digest) it rolls out here.
-  - name: ghcr.io/noncelogic/corpus-ranker
+  - name: noncelogicci.azurecr.io/corpus-ranker
     newTag: main

@@ -36,8 +36,9 @@ jobs:
       - run: npm test
 
   # Checks that the API image builds, on pull requests only. Publishing to
-  # GHCR happens once per merge to main in publish.yml, on the self-hosted
-  # runners; this job holds no write scope and pushes nothing.
+  # the estate Azure registry (noncelogicci.azurecr.io) happens once per merge
+  # to main in publish.yml, on the corpus-ranker-ci self-hosted runner; this
+  # job holds no write scope and pushes nothing.
   image:
     if: github.event_name == 'pull_request'
     needs: test

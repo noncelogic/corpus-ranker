@@ -342,9 +342,9 @@ test("the ranker's image pull secret is an ExternalSecret sourced from kv/corpus
 // secrets): the API key ExternalSecret reads only kv/corpus-ranker/api-keys and
 // the object-store ExternalSecrets read only kv/corpus-ranker/minio. The estate
 // External Secrets role holds one policy per custody path:
-// deploy/openbao/external-secrets-corpus-ranker.hcl grants read on
+// devops/openbao/policies/external-secrets-corpus-ranker.hcl grants read on
 // kv/corpus-ranker/api-keys alone and
-// deploy/openbao/external-secrets-corpus-ranker-minio.hcl read on
+// devops/openbao/policies/external-secrets-corpus-ranker-minio.hcl read on
 // kv/corpus-ranker/minio alone, each one exact path, no wildcard. Each file,
 // loaded alone into a throwaway OpenBao, reads its path and nothing else.
 const CUSTODY_PATHS = ["corpus-ranker/api-keys", "corpus-ranker/minio"] as const;
@@ -366,13 +366,13 @@ function assertExternalSecretsRead(objs: K8sObject[], names: string[], path: Cus
 }
 
 /**
- * Assert `deploy/openbao/<policyName>.hcl` grants read on kv/<path> alone, and
+ * Assert `devops/openbao/policies/<policyName>.hcl` grants read on kv/<path> alone, and
  * that a token holding that policy alone (plus OpenBao's `default`) reads it
  * while the other custody path, writes, patch, delete, list and metadata are refused.
  */
 async function assertSinglePathPolicy(t: TestContext, policyName: string, path: CustodyPath): Promise<void> {
   const other = CUSTODY_PATHS.find((p) => p !== path)!;
-  const policyFile = resolve(repoRoot, "deploy", "openbao", `${policyName}.hcl`);
+  const policyFile = resolve(repoRoot, "devops", "openbao", "policies", `${policyName}.hcl`);
   const policy = readFileSync(policyFile, "utf8");
   assert.deepEqual([...policyPaths(policy)], [[`kv/data/${path}`, ["read"]]], `${policyName} grants read on kv/${path} alone`);
   assert.doesNotMatch(policy.replace(/#.*$/gm, ""), /[*+]/, "no wildcard grants");

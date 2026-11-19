@@ -35,13 +35,31 @@ minutes for the MinIO provisioning Job, 5 for the API key Job).
 load the files into a throwaway OpenBao and run each Job's steps with its
 role's policy alone.
 
-The estate External Secrets role (the one the `openbao` ClusterSecretStore
-logs in with) holds three ranker policies, one per custody path, kept beside
-the scripts that fill their paths in `deploy/openbao/`:
-`external-secrets-corpus-ranker.hcl` (read on `kv/corpus-ranker/api-keys`),
+The estate External Secrets role `eso-obs` (Kubernetes auth mount
+`kubernetes`, the role the `openbao` ClusterSecretStore logs in with) holds
+three ranker policies, one per custody path. Two live here, in `policies/`:
 `external-secrets-corpus-ranker-minio.hcl` (read on `kv/corpus-ranker/minio`)
-and `external-secrets-ghcr-pull.hcl` (read on `kv/corpus-ranker/ghcr-pull`).
-Attach all of them: the API key and MinIO ExternalSecrets each need theirs.
+and `external-secrets-corpus-ranker.hcl` (read on `kv/corpus-ranker/api-keys`).
+[`kubernetes-roles/eso-obs.attach.json`](kubernetes-roles/eso-obs.attach.json)
+declares their attachment to `eso-obs`, in that order, add-only: the role's
+existing policies, among them the GHCR pull policy
+`deploy/openbao/external-secrets-ghcr-pull.hcl` (read on
+`kv/corpus-ranker/ghcr-pull`, moving here under CRANK-202), stay attached.
+The estate apply is CRANK-188:
+
+```sh
+bao policy write external-secrets-corpus-ranker-minio devops/openbao/policies/external-secrets-corpus-ranker-minio.hcl
+bao policy write external-secrets-corpus-ranker devops/openbao/policies/external-secrets-corpus-ranker.hcl
+# add, never replace: append the two names to the role's current token_policies
+bao read -field=token_policies auth/kubernetes/role/eso-obs
+bao write auth/kubernetes/role/eso-obs token_policies=<current>,external-secrets-corpus-ranker-minio,external-secrets-corpus-ranker
+```
+
+Every ExternalSecret in `deploy/` that reads the `openbao` store reads only a
+path one of these three policies grants; the database ExternalSecrets read no
+store (their passwords come from the in-cluster `ranker-db-password`
+generator). `tests/deploy/openbao-eso-role.test.ts` holds both.
+
 Each grant is one exact path, read-only, no wildcard (CRANK-140). The API keys are
 written by the `ranker-api-keys-generate` Sync hook Job on the first Argo CD
 sync that finds `kv/corpus-ranker/api-keys` empty, one key per principal

@@ -1,0 +1,15 @@
+{
+  "auth_mount": "kubernetes",
+  "role": "eso-obs",
+  "mode": "add",
+  "add_token_policies": [
+    {
+      "name": "external-secrets-corpus-ranker-minio",
+      "file": "devops/openbao/policies/external-secrets-corpus-ranker-minio.hcl"
+    },
+    {
+      "name": "external-secrets-corpus-ranker",
+      "file": "devops/openbao/policies/external-secrets-corpus-ranker.hcl"
+    }
+  ]
+}

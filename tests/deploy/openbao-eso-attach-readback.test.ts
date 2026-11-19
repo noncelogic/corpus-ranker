@@ -119,6 +119,13 @@ test("eso-obs attach readback: passes when the role carries every policy the att
     role: roleRead([KEYS, OTHER, MINIO]),
   }).dir);
   assert.equal(same.code, 0, same.output);
+
+  // An escape HCL decodes to the declared path itself (\u0063 is "c") is the same grant.
+  const escaped = runChecker(fakeBao(t, {
+    policies: { ...declaredPolicies(), [MINIO]: terse("kv/data/\\u0063orpus-ranker/minio") },
+    role: roleRead([OTHER, ...ATTACHED]),
+  }).dir);
+  assert.equal(escaped.code, 0, escaped.output);
 });
 
 test("eso-obs attach readback: fails naming the drift for each case: a manifest policy missing from the role's token_policies; an absent policy; an added capability; a second or wildcard path; an absent role", (t) => {
@@ -180,6 +187,22 @@ test("eso-obs attach readback: fails naming the drift for each case: a manifest 
       policies: { ...declaredPolicies(), [KEYS]: `path "kv/data/corpus-ranker/api-keys" {\n  capabilities = ["read"]\n  allowed_parameters = { "*" = [] }\n}\n` },
       role: roleRead([OTHER, ...ATTACHED]),
       drift: [new RegExp(`policy ${KEYS}: path kv/data/corpus-ranker/api-keys: setting "allowed_parameters" is not declared`)],
+    },
+    {
+      // HCL decodes \r to a carriage return: OpenBao grants read on that other path, not on the declared one.
+      name: "an escaped character in the path",
+      policies: { ...declaredPolicies(), [MINIO]: `path "kv/data/co\\rpus-ranker/minio" { capabilities = ["read"] }\n` },
+      role: roleRead([OTHER, ...ATTACHED]),
+      drift: [
+        new RegExp(`^policy ${MINIO}: path "kv/data/co\\\\rpus-ranker/minio" is not declared: capabilities \\["read"\\]$`, "m"),
+        new RegExp(`^policy ${MINIO}: path kv/data/corpus-ranker/minio is declared but absent$`, "m"),
+      ],
+    },
+    {
+      name: "an escape the checker does not decode",
+      policies: { ...declaredPolicies(), [MINIO]: `path "kv/data/\\x63orpus-ranker/minio" { capabilities = ["read"] }\n` },
+      role: roleRead([OTHER, ...ATTACHED]),
+      drift: [new RegExp(`^policy ${MINIO}: cannot be compared exactly: string .* holds the unsupported escape "\\\\\\\\x"$`, "m")],
     },
     {
       name: "an absent role",

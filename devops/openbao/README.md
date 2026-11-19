@@ -55,6 +55,18 @@ bao read -field=token_policies auth/kubernetes/role/eso-obs
 bao write auth/kubernetes/role/eso-obs token_policies=<current>,external-secrets-corpus-ranker-minio,external-secrets-corpus-ranker
 ```
 
+After applying, read the attachment back and check it (exit 1 names each
+difference: a manifest policy missing from the role's `token_policies`, an
+absent policy or role, an added capability, a second or wildcard path; it
+reads names and policy text only, and asserts nothing about the role's other
+policies):
+
+```sh
+node deploy/openbao/check-eso-attach.ts
+```
+
+`tests/deploy/openbao-eso-attach-readback.test.ts` holds the checker.
+
 Every ExternalSecret in `deploy/` that reads the `openbao` store reads only a
 path one of these three policies grants; the database ExternalSecrets read no
 store (their passwords come from the in-cluster `ranker-db-password`

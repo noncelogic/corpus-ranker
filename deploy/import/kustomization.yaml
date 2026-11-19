@@ -1,0 +1,27 @@
+# CR-M3-D1-JOB: the one-shot Job ranker-corpus-import (job.yaml) loading
+# Juno's staged weekly papers into the deployed ranker (SPEC A7 Phase 0).
+#
+# A kustomize Component, deliberately not listed in deploy/kustomization.yaml:
+# a normal Argo CD sync never renders or runs it. An operator runs it once
+# (CRANK-95), from an overlay that sets the namespace and includes it:
+#
+#   # kustomization.yaml
+#   apiVersion: kustomize.config.k8s.io/v1beta1
+#   kind: Kustomization
+#   namespace: corpus-ranker
+#   components:
+#     - <path to>/deploy/import
+#
+# tests/deploy/corpus-import-job.test.ts holds the Job.
+apiVersion: kustomize.config.k8s.io/v1alpha1
+kind: Component
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: corpus-ranker
+    includeSelectors: false
+resources:
+  - job.yaml
+images:
+  # As deploy/kustomization.yaml: the tag estate-side GitOps rolls out.
+  - name: noncelogicci.azurecr.io/corpus-ranker
+    newTag: main

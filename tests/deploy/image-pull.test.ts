@@ -1,16 +1,21 @@
-// CR-D1-PULL acceptance: every rendered ranker workload references the
-// ghcr.io/noncelogic/corpus-ranker image and an imagePullSecret that an
-// ExternalSecret syncs from OpenBao, so the estate can fetch the (private)
-// ranker image from GHCR.
+// CR-D1-PULL / CR-IMAGE-ACR acceptance: every rendered ranker workload
+// references the noncelogicci.azurecr.io/corpus-ranker image (the estate
+// Azure registry, INTENTS I21) and an imagePullSecret that an ExternalSecret
+// syncs from OpenBao, so the estate can fetch the private ranker image.
 //
 // A "ranker workload" is any pod-bearing object whose pod template runs the
 // ranker image (in a container or an init container). The API Deployment
 // and the migration Job must be among them.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { renderObjects, type K8sObject } from "./render.ts";
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
+import { renderObjects, repoRoot, type K8sObject } from "./render.ts";
 
-const RANKER_IMAGE = "ghcr.io/noncelogic/corpus-ranker";
+const REGISTRY = "noncelogicci.azurecr.io";
+const RANKER_IMAGE = `${REGISTRY}/corpus-ranker`;
+const PULL_SECRET = "ranker-registry-pull";
+const PULL_PATH = "corpus-ranker/acr-pull";
 const NAMESPACE = "corpus-ranker";
 const WAVE = "argocd.argoproj.io/sync-wave";
 
@@ -41,9 +46,11 @@ const imagesOf = (spec: Record<string, any>): string[] =>
   [...((spec.initContainers ?? []) as Container[]), ...((spec.containers ?? []) as Container[])].map((c) => c.image ?? "");
 
 /** True when `image` is the ranker image, by tag or digest (or bare). */
-const isRankerImage = (image: string): boolean => image === RANKER_IMAGE || /^ghcr\.io\/noncelogic\/corpus-ranker[:@]/.test(image);
+const isRankerImage = (image: string): boolean => image === RANKER_IMAGE || /^noncelogicci\.azurecr\.io\/corpus-ranker[:@]/.test(image);
+/** Any reference to a corpus-ranker image, from whichever registry. */
+const isAnyRankerImage = (image: string): boolean => /(^|\/)corpus-ranker(?:[:@]|$)/.test(image);
 
-test("every rendered ranker workload references the ghcr.io/noncelogic/corpus-ranker image and an imagePullSecret that an ExternalSecret syncs from OpenBao", () => {
+test("every rendered ranker workload references the noncelogicci.azurecr.io/corpus-ranker image and an imagePullSecret that an ExternalSecret syncs from OpenBao", () => {
   const objects = renderObjects();
 
   const workloads = objects.filter((o) => {
@@ -60,8 +67,8 @@ test("every rendered ranker workload references the ghcr.io/noncelogic/corpus-ra
     const spec = podSpec(w)!;
 
     // The ranker image is the one published by .github/workflows/publish.yml.
-    for (const image of imagesOf(spec).filter((i) => i.startsWith("ghcr.io/noncelogic/"))) {
-      assert.match(image, /^ghcr\.io\/noncelogic\/corpus-ranker[:@]/, `${id} pulls ${image}, not a pinned ${RANKER_IMAGE}`);
+    for (const image of imagesOf(spec).filter((i) => i.startsWith("ghcr.io/noncelogic/") || i.startsWith(`${REGISTRY}/`) || isAnyRankerImage(i))) {
+      assert.match(image, /^noncelogicci\.azurecr\.io\/corpus-ranker[:@]/, `${id} pulls ${image}, not a pinned ${RANKER_IMAGE}`);
     }
 
     const pullSecrets = ((spec.imagePullSecrets ?? []) as Array<{ name?: string }>).map((s) => s.name).filter((n): n is string => !!n);
@@ -109,21 +116,52 @@ test("every rendered ranker workload references the ghcr.io/noncelogic/corpus-ra
   }
 });
 
-// Per-product registry credential (policy registry-credential-per-product v2,
-// CR-D1-DEC-PULL): the pull secret is the ranker's own, read from its own
-// OpenBao path and nowhere else -- not a shared or another product's key.
-test("the ranker-ghcr-pull ExternalSecret reads only kv corpus-ranker/ghcr-pull, the ranker's own pull credential", () => {
-  const objects = renderObjects();
-  const matches = objects.filter((o) => o.kind === "ExternalSecret" && o.metadata.name === "ranker-ghcr-pull");
-  assert.equal(matches.length, 1, "exactly one ExternalSecret ranker-ghcr-pull must be rendered");
-  const es = matches[0]!;
+/** Render an ESO dockerconfigjson template of the one form the ranker uses, for given values. */
+function renderDockerConfig(template: string, values: Record<string, string>): unknown {
+  const text = template
+    .replace(/\{\{\s*printf\s+"%s:%s"\s+\.(\w+)\s+\.(\w+)\s*\|\s*b64enc\s*\}\}/g, (_, a: string, b: string) =>
+      Buffer.from(`${values[a]}:${values[b]}`).toString("base64"),
+    )
+    .replace(/\{\{\s*\.(\w+)\s*\}\}/g, (_, k: string) => {
+      assert.ok(k in values, `template reads .${k}, which the ExternalSecret does not provide`);
+      return values[k]!;
+    });
+  assert.doesNotMatch(text, /\{\{/, "template has an expression this check does not understand");
+  return JSON.parse(text);
+}
 
+// Per-product registry credential (Rule: policies/placement-defaults.yaml#credentials;
+// INTENTS I21): the ranker pulls from the estate Azure registry with its own
+// pull-only ACR token corpus-ranker-pull, custodied at kv/corpus-ranker/acr-pull
+// and readable by the estate External Secrets role. The GHCR pull secret,
+// its store script and its OpenBao policy are gone.
+test("the API Deployment and the migration Job pull noncelogicci.azurecr.io/corpus-ranker with ranker-registry-pull from kv/corpus-ranker/acr-pull", () => {
+  const objects = renderObjects();
+
+  for (const [kind, name] of [["Deployment", "ranker-api"], ["Job", "ranker-db-migrate"]] as const) {
+    const w = objects.find((o) => o.kind === kind && o.metadata.name === name);
+    assert.ok(w, `${kind}/${name} is not rendered`);
+    const spec = podSpec(w)!;
+    const ranker = imagesOf(spec).filter(isAnyRankerImage);
+    assert.ok(ranker.length > 0, `${kind}/${name} runs no corpus-ranker image`);
+    for (const image of ranker) assert.match(image, /^noncelogicci\.azurecr\.io\/corpus-ranker[:@]/, `${kind}/${name} pulls ${image}`);
+    assert.deepEqual(
+      ((spec.imagePullSecrets ?? []) as Array<{ name?: string }>).map((s) => s.name),
+      [PULL_SECRET],
+      `${kind}/${name} must pull with ${PULL_SECRET} alone`,
+    );
+  }
+
+  const matches = objects.filter((o) => o.kind === "ExternalSecret" && o.metadata.name === PULL_SECRET);
+  assert.equal(matches.length, 1, `exactly one ExternalSecret ${PULL_SECRET} must be rendered`);
+  const es = matches[0]!;
+  assert.equal(es.spec?.target?.name ?? es.metadata.name, PULL_SECRET);
   assert.deepEqual(
     { kind: es.spec?.secretStoreRef?.kind, name: es.spec?.secretStoreRef?.name },
     { kind: "ClusterSecretStore", name: "openbao" },
-    "ranker-ghcr-pull must read from the OpenBao ClusterSecretStore",
+    `${PULL_SECRET} must read from the OpenBao ClusterSecretStore`,
   );
-  assert.equal(es.spec?.dataFrom, undefined, "ranker-ghcr-pull must not extract or generate whole keys via dataFrom");
+  assert.equal(es.spec?.dataFrom, undefined, `${PULL_SECRET} must not extract or generate whole keys via dataFrom`);
 
   const refs = ((es.spec?.data ?? []) as Array<{ secretKey?: string; remoteRef?: { key?: string; property?: string } }>).map((d) => ({
     secretKey: d.secretKey,
@@ -133,16 +171,37 @@ test("the ranker-ghcr-pull ExternalSecret reads only kv corpus-ranker/ghcr-pull,
   assert.deepEqual(
     refs.toSorted((a, b) => String(a.secretKey).localeCompare(String(b.secretKey))),
     [
-      { secretKey: "token", key: "corpus-ranker/ghcr-pull", property: "token" },
-      { secretKey: "username", key: "corpus-ranker/ghcr-pull", property: "username" },
+      { secretKey: "password", key: PULL_PATH, property: "password" },
+      { secretKey: "username", key: PULL_PATH, property: "username" },
     ],
-    "ranker-ghcr-pull must read exactly username and token from kv corpus-ranker/ghcr-pull",
+    `${PULL_SECRET} must read exactly username and password from kv/${PULL_PATH}`,
   );
+
+  // The rendered Secret is a dockerconfigjson for the Azure registry alone.
+  assert.equal(es.spec?.target?.template?.type, "kubernetes.io/dockerconfigjson");
+  const config = renderDockerConfig(es.spec.target.template.data[".dockerconfigjson"], { username: "corpus-ranker-pull", password: "s3cret" }) as {
+    auths: Record<string, { username: string; password: string; auth: string }>;
+  };
+  assert.deepEqual(Object.keys(config), ["auths"]);
+  assert.deepEqual(Object.keys(config.auths), [REGISTRY], `the pull secret authenticates to ${REGISTRY} only`);
+  assert.deepEqual(config.auths[REGISTRY], {
+    username: "corpus-ranker-pull",
+    password: "s3cret",
+    auth: Buffer.from("corpus-ranker-pull:s3cret").toString("base64"),
+  });
 
   // No other ExternalSecret reads the ranker's pull credential.
   const otherReaders = objects
-    .filter((o) => o.kind === "ExternalSecret" && o.metadata.name !== "ranker-ghcr-pull")
-    .filter((o) => JSON.stringify(o.spec ?? {}).includes("corpus-ranker/ghcr-pull"))
+    .filter((o) => o.kind === "ExternalSecret" && o.metadata.name !== PULL_SECRET)
+    .filter((o) => JSON.stringify(o.spec ?? {}).includes(PULL_PATH))
     .map((o) => o.metadata.name);
-  assert.deepEqual(otherReaders, [], "only ranker-ghcr-pull may read kv corpus-ranker/ghcr-pull");
+  assert.deepEqual(otherReaders, [], `only ${PULL_SECRET} may read kv/${PULL_PATH}`);
+
+  // The GHCR bridge is gone: no GHCR pull secret, nothing reads kv/corpus-ranker/ghcr-pull,
+  // and its store script and OpenBao policy are deleted.
+  assert.deepEqual(objects.filter((o) => o.metadata.name === "ranker-ghcr-pull").map((o) => o.kind), []);
+  assert.doesNotMatch(JSON.stringify(objects), /ghcr\.io\/noncelogic|corpus-ranker\/ghcr-pull/);
+  for (const f of ["deploy/openbao/store-ghcr-pull.sh", "deploy/openbao/external-secrets-ghcr-pull.hcl"]) {
+    assert.ok(!existsSync(resolve(repoRoot, f)), `${f} must be deleted`);
+  }
 });

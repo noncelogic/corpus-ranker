@@ -6,9 +6,9 @@
 // path (Rule: policies/placement-defaults.yaml#estate secrets;
 // Rule: policies/placement-defaults.yaml#code_location). Every ExternalSecret
 // in the deploy overlay that reads ClusterSecretStore `openbao` reads only a
-// path those policies or the role's existing GHCR pull policy
-// (deploy/openbao/external-secrets-ghcr-pull.hcl, until CRANK-202 moves it)
-// grant, and the generator-sourced database ExternalSecrets read no store
+// path those policies grant or the role's estate-held ACR pull grant
+// (kv/corpus-ranker/acr-pull, meta-harness devops/aks/corpus-ranker-argo/README.md)
+// covers, and the generator-sourced database ExternalSecrets read no store
 // (Rule: policies/placement-defaults.yaml#estate grants_from_spec).
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -19,8 +19,11 @@ import { policyPaths } from "./openbao-dev.ts";
 
 const ATTACH_FILE = "devops/openbao/kubernetes-roles/eso-obs.attach.json";
 const ATTACHED = ["external-secrets-corpus-ranker-minio", "external-secrets-corpus-ranker"];
-/** The role's existing GHCR pull policy, outside devops/openbao/policies until CRANK-202. */
-const GHCR_POLICY = "deploy/openbao/external-secrets-ghcr-pull.hcl";
+/**
+ * The role's estate-held grant on the ranker's ACR pull credential (INTENTS I21):
+ * kept in meta-harness devops/aks/corpus-ranker-argo/README.md, not in this repo.
+ */
+const ESTATE_GRANTED = ["corpus-ranker/acr-pull"];
 const GENERATED = ["ranker-db-migrator", "ranker-db-service"];
 
 interface Attach {
@@ -102,7 +105,7 @@ function assertReadsGranted(objs: K8sObject[], granted: Set<string>): void {
   }
 }
 
-const grantedByRole = (a: Attach): Set<string> => new Set([...a.add_token_policies.map((p) => grantedPath(p.file)), grantedPath(GHCR_POLICY)]);
+const grantedByRole = (a: Attach): Set<string> => new Set([...a.add_token_policies.map((p) => grantedPath(p.file)), ...ESTATE_GRANTED]);
 
 test("the eso-obs attach manifest names mount kubernetes, role eso-obs and exactly the two ranker read policy files, adding only", () => {
   const a = readAttach();
@@ -130,10 +133,10 @@ test("the eso-obs attach manifest names mount kubernetes, role eso-obs and exact
   assert.throws(() => grantedPath("devops/openbao/policies/corpus-ranker-minio-provision.hcl"));
 });
 
-test("every ExternalSecret that reads ClusterSecretStore openbao reads only a kv path an attached policy or the role's existing GHCR pull policy grants, and the generator-sourced database ExternalSecrets read no store", () => {
+test("every ExternalSecret that reads ClusterSecretStore openbao reads only a kv path an attached policy or the role's estate-held ACR pull grant covers, and the generator-sourced database ExternalSecrets read no store", () => {
   const objs = renderObjects();
   const granted = grantedByRole(readAttach());
-  assert.deepEqual([...granted].sort(), ["corpus-ranker/api-keys", "corpus-ranker/ghcr-pull", "corpus-ranker/minio"]);
+  assert.deepEqual([...granted].sort(), ["corpus-ranker/acr-pull", "corpus-ranker/api-keys", "corpus-ranker/minio"]);
   assertReadsGranted(objs, granted);
 
   // The check refuses an ungranted path, a find, and a store read on a generated secret.
@@ -150,7 +153,7 @@ test("every ExternalSecret that reads ClusterSecretStore openbao reads only a kv
   assert.throws(() => assertReadsGranted(mutate("ranker-db-service", (s) => (s.secretStoreRef = { kind: "ClusterSecretStore", name: "openbao" })), granted));
   assert.throws(() =>
     assertReadsGranted(
-      mutate("ranker-db-migrator", (s) => s.data = [{ secretKey: "x", sourceRef: { storeRef: { kind: "ClusterSecretStore", name: "openbao" } }, remoteRef: { key: "corpus-ranker/ghcr-pull" } }]),
+      mutate("ranker-db-migrator", (s) => s.data = [{ secretKey: "x", sourceRef: { storeRef: { kind: "ClusterSecretStore", name: "openbao" } }, remoteRef: { key: "corpus-ranker/acr-pull" } }]),
       granted,
     ),
   );

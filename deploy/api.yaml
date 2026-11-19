@@ -33,10 +33,10 @@ spec:
         seccompProfile:
           type: RuntimeDefault
       imagePullSecrets:
-        - name: ranker-ghcr-pull
+        - name: ranker-registry-pull
       containers:
         - name: api
-          image: ghcr.io/noncelogic/corpus-ranker
+          image: noncelogicci.azurecr.io/corpus-ranker
           env:
             - name: RANKER_HOST
               value: 0.0.0.0

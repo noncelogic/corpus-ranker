@@ -5,7 +5,7 @@
 # external-secrets-corpus-ranker.hcl. Both are attached estate-side, add-only,
 # to the Kubernetes auth role eso-obs the `openbao` ClusterSecretStore logs in
 # with (devops/openbao/kubernetes-roles/eso-obs.attach.json), beside
-# deploy/openbao/external-secrets-ghcr-pull.hcl; this one's readers in this product are the
+# the estate-held ACR pull grant (kv/corpus-ranker/acr-pull); this one's readers in this product are the
 # ExternalSecrets `ranker-minio` and `ranker-minio-service`
 # (kv/corpus-ranker/minio, written by the ranker-minio-provision Job) in
 # deploy/externalsecrets.yaml.

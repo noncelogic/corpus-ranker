@@ -37,14 +37,14 @@ role's policy alone.
 
 The estate External Secrets role `eso-obs` (Kubernetes auth mount
 `kubernetes`, the role the `openbao` ClusterSecretStore logs in with) holds
-three ranker policies, one per custody path. Two live here, in `policies/`:
+ranker read grants, one per custody path. Two live here, in `policies/`:
 `external-secrets-corpus-ranker-minio.hcl` (read on `kv/corpus-ranker/minio`)
 and `external-secrets-corpus-ranker.hcl` (read on `kv/corpus-ranker/api-keys`).
 [`kubernetes-roles/eso-obs.attach.json`](kubernetes-roles/eso-obs.attach.json)
 declares their attachment to `eso-obs`, in that order, add-only: the role's
-existing policies, among them the GHCR pull policy
-`deploy/openbao/external-secrets-ghcr-pull.hcl` (read on
-`kv/corpus-ranker/ghcr-pull`, moving here under CRANK-202), stay attached.
+existing policies, among them the estate-held grant on the ranker's ACR pull
+credential `kv/corpus-ranker/acr-pull` (meta-harness
+devops/aks/corpus-ranker-argo/README.md), stay attached.
 The estate apply is CRANK-188:
 
 ```sh
@@ -56,7 +56,7 @@ bao write auth/kubernetes/role/eso-obs token_policies=<current>,external-secrets
 ```
 
 Every ExternalSecret in `deploy/` that reads the `openbao` store reads only a
-path one of these three policies grants; the database ExternalSecrets read no
+path one of these grants covers; the database ExternalSecrets read no
 store (their passwords come from the in-cluster `ranker-db-password`
 generator). `tests/deploy/openbao-eso-role.test.ts` holds both.
 

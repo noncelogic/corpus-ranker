@@ -180,6 +180,28 @@ test("writeback readback: fails naming the drift for each case: an added list, d
       ],
     },
     {
+      // OpenBao ORs the selector with bound_service_account_namespaces: any namespace it matches may log in.
+      name: "an undeclared bound namespace selector",
+      half: "role",
+      policy: declaredPolicy,
+      role: roleRead({ bound_service_account_namespace_selector: "{\"matchLabels\":{\"team\":\"x\"}}" }),
+      drift: [new RegExp(`role ${ROLE_PATH}: bound_service_account_namespace_selector: read .*matchLabels.*, not declared \\(expected the default ""\\)`)],
+    },
+    {
+      name: "an undeclared bound CIDR list",
+      half: "role",
+      policy: declaredPolicy,
+      role: roleRead({ token_bound_cidrs: ["0.0.0.0/0"] }),
+      drift: [new RegExp(`role ${ROLE_PATH}: token_bound_cidrs: read \\["0\\.0\\.0\\.0/0"\\], not declared`)],
+    },
+    {
+      name: "a role field the checker does not know, set",
+      half: "role",
+      policy: declaredPolicy,
+      role: roleRead({ future_bound_claims: { group: "admins" } }),
+      drift: [new RegExp(`role ${ROLE_PATH}: future_bound_claims: read .*, not declared \\(expected unset\\)`)],
+    },
+    {
       name: "an extra attached policy",
       half: "role",
       policy: declaredPolicy,

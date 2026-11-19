@@ -16,7 +16,8 @@
 //     any setting other than `capabilities` in a stanza;
 //   - each role field the role file declares: list fields as sets, both ways
 //     (another bound service account or namespace, an extra attached
-//     policy), TTLs in seconds.
+//     policy), TTLs in seconds; and every role field it does not declare
+//     against OpenBao's default (a namespace selector, bound CIDRs, ...).
 //
 // The expected grant is the estate's credential_writeback rule as
 // CR-M3-DEC-KEYGEN-GRANT applies it (Rule:
@@ -184,6 +185,55 @@ function comparePolicy(declared: Grants, read: Grants): string[] {
   return drift;
 }
 
+/**
+ * What OpenBao reads back for a Kubernetes auth role field the role file does
+ * not declare: the field's default. A non-default value there widens or
+ * changes the grant without the file saying so (for example
+ * bound_service_account_namespace_selector, which OpenBao ORs with
+ * bound_service_account_namespaces), so it is drift.
+ */
+const ROLE_DEFAULTS: Record<string, unknown> = {
+  alias_name_source: "serviceaccount_uid",
+  audience: "",
+  bound_service_account_names: [],
+  bound_service_account_namespace_selector: "",
+  bound_service_account_namespaces: [],
+  token_bound_cidrs: [],
+  token_explicit_max_ttl: 0,
+  token_max_ttl: 0,
+  token_no_default_policy: false,
+  token_num_uses: 0,
+  token_period: 0,
+  token_policies: [],
+  token_strictly_bind_ip: false,
+  token_ttl: 0,
+  token_type: "default",
+};
+
+/** Deprecated role fields OpenBao may echo as a copy of their token_* field; checked against that field's read value. */
+const LEGACY_ROLE_FIELDS: Record<string, string> = {
+  bound_cidrs: "token_bound_cidrs",
+  max_ttl: "token_max_ttl",
+  num_uses: "token_num_uses",
+  period: "token_period",
+  ttl: "token_ttl",
+};
+
+/** An unset value as OpenBao reads it back: empty string or list, zero, false or null. */
+const isEmptyValue = (v: unknown) => v === undefined || v === null || v === "" || v === 0 || v === false || (Array.isArray(v) && v.length === 0);
+
+/** Equal as OpenBao values: lists as sets, durations in seconds, empty values alike. */
+function sameValue(field: string, a: unknown, b: unknown): boolean {
+  if (isEmptyValue(a) && isEmptyValue(b)) return true;
+  if (Array.isArray(a) && Array.isArray(b)) {
+    const sa = new Set(a.map(String));
+    const sb = new Set(b.map(String));
+    return sa.size === sb.size && [...sa].every((v) => sb.has(v));
+  }
+  if (/(^|_)(ttl|period)$/.test(field) && seconds(a) !== undefined) return seconds(a) === seconds(b);
+  return quote(a) === quote(b);
+}
+
 function compareRole(declared: Record<string, unknown>, read: Record<string, unknown>): string[] {
   const drift: string[] = [];
   const at = `role ${ROLE_PATH}`;
@@ -204,6 +254,16 @@ function compareRole(declared: Record<string, unknown>, read: Record<string, unk
       if (g !== w) drift.push(`${at}: ${field}: read ${g === undefined ? quote(got) : `${g}s`}, declared ${w}s (${want})`);
     } else if (quote(got) !== quote(want)) {
       drift.push(`${at}: ${field}: read ${quote(got)}, declared ${quote(want)}`);
+    }
+  }
+  // Every field the file leaves out must read back as its default; one OpenBao does not know of must read back unset.
+  for (const [field, got] of Object.entries(read).sort(([a], [b]) => a.localeCompare(b))) {
+    if (field in declared || field === "policies") continue;
+    const legacy = LEGACY_ROLE_FIELDS[field];
+    const want = legacy !== undefined ? read[legacy] : ROLE_DEFAULTS[field];
+    if (!sameValue(field, got, want)) {
+      const what = legacy !== undefined ? `${legacy} (${quote(want)})` : field in ROLE_DEFAULTS ? `the default ${quote(want)}` : "unset";
+      drift.push(`${at}: ${field}: read ${quote(got)}, not declared (expected ${what})`);
     }
   }
   // OpenBao may still echo the deprecated `policies` alongside token_policies; an extra policy there is drift too.

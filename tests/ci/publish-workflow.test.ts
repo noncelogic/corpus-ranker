@@ -18,7 +18,9 @@
 // production workflow and credential script are never edited.
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -50,6 +52,13 @@ interface Estate {
   creds: { registry: string; username: string; password: string };
   /** OpenBao refuses every auth/jwt login (e.g. the role's bound claims do not match). */
   refuseLogin?: boolean;
+  /**
+   * Pull-request posture: every credential source is a tripwire that refuses
+   * and records the access — the OIDC endpoint and OpenBao answer 403, a
+   * registry login, push or pull fails, a read of the runner-mount decoy
+   * yields nothing, and every `secrets.*` the runner evaluates is logged.
+   */
+  tripwires?: boolean;
 }
 
 /**
@@ -70,6 +79,7 @@ async function fakeEstate(t: TestContext, estate: Estate): Promise<{ url: string
         res.writeHead(status, { "Content-Type": "application/json" });
         res.end(JSON.stringify(json));
       };
+      if (estate.tripwires) return send(403, { errors: ["tripwire: no credential access from a pull request"] });
       if (req.method === "GET" && url.pathname === "/oidc") {
         if (req.headers.authorization !== `Bearer ${OIDC_REQUEST_TOKEN}`) return send(401, {});
         if (url.searchParams.get("audience") !== "openbao") return send(200, { value: "jwt-for-another-audience" });
@@ -98,7 +108,15 @@ interface Simulation {
   jobs: JobRun[];
   /** Every docker/npm/kustomize invocation, in order, as "<tool> <argv>". */
   calls: string[];
+  /** Every docker invocation as "<workflow name>/<job id> DRY_RUN_OF=<value> <subcommand>" (from GITHUB_WORKFLOW, GITHUB_JOB). */
+  dockerJobs: string[];
   requests: string[];
+  /**
+   * Every credential access the tripwires recorded (Estate.tripwires): "oidc
+   * <path>", "openbao <path>", "registry <login|push|pull>", "mount <file>",
+   * "secret <name>". Empty when tripwires are off.
+   */
+  access: string[];
   loginStdin?: string;
   output: string;
 }
@@ -109,23 +127,48 @@ interface Simulation {
  * decoy of the old runner mount, holding a different credential, is offered
  * to every step as REGISTRY_PUSH_DIR: nothing may use it.
  */
-async function simulate(
-  t: TestContext,
-  event: WorkflowEvent,
-  estate: Estate,
-  workflows?: string[],
+interface SimulateOptions {
+  /** Workflow files to run; default every workflow the event triggers. */
+  workflows?: string[];
   /** Extra host environment, e.g. the stand-in docker's FAKE_DOCKER_* faults. */
-  extraEnv: Record<string, string> = {},
-): Promise<Simulation> {
+  env?: Record<string, string>;
+  /** Checkout to run in (default the repository itself); its .github/workflows are the ones run. */
+  workspace?: string;
+}
+
+/**
+ * Turn each runner-mount decoy file into a FIFO watched by a writer loop: a
+ * step that opens it is recorded as "mount <file>" and reads nothing, so the
+ * credential it hoped for is empty.
+ */
+async function mountTripwire(t: TestContext, decoy: string, log: string): Promise<void> {
+  for (const file of ["registry", "username", "password"]) {
+    const fifo = join(decoy, file);
+    const mkfifo = spawn("mkfifo", [fifo], { stdio: "ignore" });
+    const [code] = (await once(mkfifo, "close")) as [number | null];
+    assert.equal(code, 0, `mkfifo ${fifo}`);
+    const writer = spawn("bash", ["-c", 'while :; do exec 3>"$1"; echo "mount $2" >> "$3"; exec 3>&-; done', "_", fifo, file, log], {
+      stdio: "ignore",
+    });
+    t.after(() => writer.kill("SIGKILL"));
+  }
+}
+
+async function simulate(t: TestContext, event: WorkflowEvent, estate: Estate, opts: SimulateOptions = {}): Promise<Simulation> {
   const fake = await fakeEstate(t, estate);
   const dir = mkdtempSync(join(tmpdir(), "publish-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const bin = join(dir, "bin");
   const decoy = join(dir, "registry-push");
+  const accessLog = join(dir, "access");
   for (const d of [bin, decoy]) mkdirSync(d);
-  writeFileSync(join(decoy, "registry"), `${REGISTRY}\n`);
-  writeFileSync(join(decoy, "username"), "mounted-user\n");
-  writeFileSync(join(decoy, "password"), "mounted-password\n");
+  if (estate.tripwires) {
+    await mountTripwire(t, decoy, accessLog);
+  } else {
+    writeFileSync(join(decoy, "registry"), `${REGISTRY}\n`);
+    writeFileSync(join(decoy, "username"), "mounted-user\n");
+    writeFileSync(join(decoy, "password"), "mounted-password\n");
+  }
   const dockerState = join(dir, "docker-state");
   mkdirSync(dockerState);
   for (const tool of ["docker", "npm", "kustomize"]) {
@@ -133,22 +176,27 @@ async function simulate(
       join(bin, tool),
       `#!/bin/bash\nargs="$*"; echo "${tool} \${args//$'\\n'/ }" >> "${dir}/calls"\n` +
         (tool === "docker"
-          ? `case "$1" in login) cat > "${dir}/login-stdin" ;; esac\nDOCKER_STATE="${dockerState}"\n. "${FAKE_DOCKER}" "$@"\n`
+          ? `echo "\${GITHUB_WORKFLOW}/\${GITHUB_JOB} DRY_RUN_OF=\${DRY_RUN_OF-} $1" >> "${dir}/docker-jobs"\n` +
+            (estate.tripwires ? `case "$1" in login|push|pull) echo "registry $1" >> "${accessLog}"; exit 1 ;; esac\n` : "") +
+            `case "$1" in login) cat > "${dir}/login-stdin" ;; esac\nDOCKER_STATE="${dockerState}"\n. "${FAKE_DOCKER}" "$@"\n`
           : "") +
         "exit 0\n",
     );
     chmodSync(join(bin, tool), 0o755);
   }
 
+  const workspace = opts.workspace ?? repoRoot;
+  const secretReads: string[] = [];
   const jobs = await runEvent({
-    workflowsDir,
-    workflows,
+    workflowsDir: resolve(workspace, ".github", "workflows"),
+    workflows: opts.workflows,
     event,
-    workspace: repoRoot,
+    workspace,
     repository: "noncelogic/corpus-ranker",
     vars: { OPENBAO_ADDR: fake.url },
-    hostEnv: { PATH: `${bin}:${process.env.PATH}`, HOME: dir, REGISTRY_PUSH_DIR: decoy, ...extraEnv },
+    hostEnv: { PATH: `${bin}:${process.env.PATH}`, HOME: dir, REGISTRY_PUSH_DIR: decoy, ...opts.env },
     oidc: { url: `${fake.url}/oidc?api-version=2.0`, token: OIDC_REQUEST_TOKEN },
+    onSecretRead: (name) => secretReads.push(name),
   });
   const read = (f: string): string | undefined => {
     try {
@@ -160,7 +208,16 @@ async function simulate(
   return {
     jobs,
     calls: (read("calls") ?? "").trim().split("\n").filter(Boolean),
+    dockerJobs: (read("docker-jobs") ?? "").trim().split("\n").filter(Boolean),
     requests: fake.requests,
+    access: estate.tripwires
+      ? [
+          ...fake.requests.map((r) => (r.includes(" /oidc") ? `oidc ${r}` : `openbao ${r}`)),
+          // The FIFO writer may record one open more than once while the reader holds it.
+          ...new Set((read("access") ?? "").trim().split("\n").filter(Boolean)),
+          ...secretReads.map((n) => `secret ${n}`),
+        ]
+      : [],
     loginStdin: read("login-stdin"),
     output: jobs.flatMap((j) => j.steps.map((s) => s.output)).join("\n"),
   };
@@ -182,7 +239,7 @@ test("publish logs in through OpenBao JWT role corpus-ranker-registry-push and n
   // OpenBao JWT login with the bound role -> read the push token -> docker
   // login to the registry it names, password on stdin -> push the SHA tag ->
   // log out.
-  const ok = await simulate(t, PUSH_MAIN, { creds: GOOD }, ["publish.yml"]);
+  const ok = await simulate(t, PUSH_MAIN, { creds: GOOD }, { workflows: ["publish.yml"] });
   const job = publishJob(ok);
   assert.equal(job.status, "success", ok.output);
   assert.deepEqual(job.runsOn, ["self-hosted", "corpus-ranker-ci"], "runs-on stays [self-hosted, corpus-ranker-ci]");
@@ -206,14 +263,14 @@ test("publish logs in through OpenBao JWT role corpus-ranker-registry-push and n
 
   // OpenBao refuses the login (e.g. the role's bound claims do not match):
   // the job fails, no secret is read, nothing is logged in to or pushed.
-  const refused = await simulate(t, PUSH_MAIN, { creds: GOOD, refuseLogin: true }, ["publish.yml"]);
+  const refused = await simulate(t, PUSH_MAIN, { creds: GOOD, refuseLogin: true }, { workflows: ["publish.yml"] });
   assert.equal(publishJob(refused).status, "failure", "a login OpenBao refuses must fail the job");
   assert.deepEqual(refused.requests, ["GET /oidc", "POST /v1/auth/jwt/login"]);
   assert.deepEqual(refused.calls.filter((c) => !/^docker (build|logout) /.test(c)), [], "nothing is logged in to or pushed without the OpenBao credential");
   assert.ok(!refused.output.includes(OIDC_JWT), "the OIDC token is not printed on refusal");
 
   // A credential for another registry is refused before any login or push.
-  const wrong = await simulate(t, PUSH_MAIN, { creds: { registry: "ghcr.io", username: "u", password: PASSWORD } }, ["publish.yml"]);
+  const wrong = await simulate(t, PUSH_MAIN, { creds: { registry: "ghcr.io", username: "u", password: PASSWORD } }, { workflows: ["publish.yml"] });
   assert.equal(publishJob(wrong).status, "failure", "a push credential for another registry must fail the job");
   assert.deepEqual(wrong.calls.filter((c) => !/^docker (build|logout) /.test(c)), [], "nothing is logged in to or pushed with a mismatched credential");
   assert.ok(!wrong.output.includes(PASSWORD), "the password is not printed on refusal");
@@ -269,35 +326,69 @@ const ciJob = (sim: Simulation, id: string): JobRun => {
 };
 const builds = (sim: Simulation): string[] => sim.calls.filter((c) => c.startsWith("docker build "));
 
+/**
+ * A scratch checkout of the repository's workflows and scripts in which the
+ * shared build definition is edited by `edit`: what both workflows then pass
+ * docker shows whether they really build from that one definition.
+ */
+function checkoutWith(t: TestContext, edit: (definition: string) => string): string {
+  const ws = mkdtempSync(join(tmpdir(), "checkout-"));
+  t.after(() => rmSync(ws, { recursive: true, force: true }));
+  cpSync(resolve(repoRoot, ".github"), join(ws, ".github"), { recursive: true });
+  const definition = join(ws, ".github", "scripts", "image-build.sh");
+  const before = readFileSync(definition, "utf8");
+  const after = edit(before);
+  assert.notEqual(after, before, "the probe edit changed the shared build definition");
+  writeFileSync(definition, after);
+  return ws;
+}
+
 test("ci.yml's image job declares DRY_RUN_OF image and builds from the same build inputs as publish.yml's image job", async (t) => {
-  const ci = jobsOf("ci.yml");
-  const publish = jobsOf("publish.yml");
-  assert.deepEqual(ci.image?.env, { DRY_RUN_OF: "image" }, "ci.yml's image job declares DRY_RUN_OF: image");
-  assert.ok(publish[String((ci.image!.env as Record<string, string>).DRY_RUN_OF)], "DRY_RUN_OF names publish.yml's image job");
-
-  // One shared definition: neither workflow spells out its own docker build.
-  for (const file of ["ci.yml", "publish.yml"]) {
-    const source = readFileSync(resolve(workflowsDir, file), "utf8");
-    assert.doesNotMatch(source, /docker\s+(buildx\s+)?build/, `${file} builds only through .github/scripts/image-build.sh`);
-    assert.match(source, /\. \.github\/scripts\/image-build\.sh/, `${file} sources the shared build definition`);
-  }
-
   // Run as written: the pull request's build and main's publish build pass
   // docker the same Dockerfile, context, platform, build arguments and
   // labels; only the tag differs.
-  const pr = await simulate(t, PULL_REQUEST, { creds: GOOD }, ["ci.yml"]);
-  const main = await simulate(t, PUSH_MAIN, { creds: GOOD }, ["publish.yml"]);
+  const pr = await simulate(t, PULL_REQUEST, { creds: GOOD }, { workflows: ["ci.yml"] });
+  const main = await simulate(t, PUSH_MAIN, { creds: GOOD }, { workflows: ["publish.yml"] });
   assert.equal(builds(pr).length, 1, pr.calls.join("\n"));
   assert.equal(builds(main).length, 1, main.calls.join("\n"));
   const expected = `docker build -f Dockerfile --platform linux/amd64 ${LABELS.map((l) => `--label ${l}`).join(" ")} -t <tag> .`;
   assert.equal(builds(pr)[0]!.replace(` -t ${PR_TAG} `, " -t <tag> "), expected, "the pull request builds from the shared inputs");
   assert.equal(builds(main)[0]!.replace(` -t ${PUBLISH_TAG} `, " -t <tag> "), expected, "publish builds from the shared inputs");
   assert.equal(ciJob(pr, "image").status, "success", pr.output);
+
+  // DRY_RUN_OF as the running job sees it: the pull request's build runs in
+  // ci/image with DRY_RUN_OF=image, and the job it names is the one whose
+  // build main publishes (publish/image, itself no dry run).
+  const prBuilds = pr.dockerJobs.filter((j) => j.endsWith(" build"));
+  const mainBuilds = main.dockerJobs.filter((j) => j.endsWith(" build"));
+  assert.deepEqual(prBuilds, ["ci/image DRY_RUN_OF=image build"], pr.dockerJobs.join("\n"));
+  const named = /DRY_RUN_OF=(\S+)/.exec(prBuilds[0]!)![1]!;
+  assert.deepEqual(mainBuilds, [`publish/${named} DRY_RUN_OF= build`], "DRY_RUN_OF names the publish job that builds what main pushes");
+
+  // One shared definition, observed: change every build input in the shared
+  // definition only, and both workflows' builds change the same way, while
+  // the pull request's manifest check still passes against it.
+  const ws = checkoutWith(t, (d) =>
+    d
+      .replace('IMAGE_DOCKERFILE="Dockerfile"', 'IMAGE_DOCKERFILE="Dockerfile.probe"')
+      .replace('IMAGE_CONTEXT="."', 'IMAGE_CONTEXT="probe-context"')
+      .replace('IMAGE_PLATFORM="linux/amd64"', 'IMAGE_PLATFORM="linux/arm64"')
+      .replace("IMAGE_BUILD_ARGS=()", "IMAGE_BUILD_ARGS=(PROBE_ARG=1)")
+      .replace('echo "org.opencontainers.image.revision=${GITHUB_SHA}"', 'echo "org.opencontainers.image.revision=${GITHUB_SHA}"\n  echo "probe.label=1"'),
+  );
+  const prProbe = await simulate(t, PULL_REQUEST, { creds: GOOD }, { workflows: ["ci.yml"], workspace: ws });
+  const mainProbe = await simulate(t, PUSH_MAIN, { creds: GOOD }, { workflows: ["publish.yml"], workspace: ws });
+  const probed =
+    "docker build -f Dockerfile.probe --platform linux/arm64 --build-arg PROBE_ARG=1 " +
+    `${[...LABELS, "probe.label=1"].map((l) => `--label ${l}`).join(" ")} -t <tag> probe-context`;
+  assert.deepEqual(builds(prProbe).map((b) => b.replace(` -t ${PR_TAG} `, " -t <tag> ")), [probed], prProbe.output);
+  assert.deepEqual(builds(mainProbe).map((b) => b.replace(` -t ${PUBLISH_TAG} `, " -t <tag> ")), [probed], mainProbe.output);
+  assert.equal(ciJob(prProbe, "image").status, "success", prProbe.output);
 });
 
 test("the pull-request image job fails when the built image's manifest or metadata labels differ from what publish pushes", async (t) => {
   // The build as defined passes the check, and the check really reads the built image.
-  const ok = await simulate(t, PULL_REQUEST, { creds: GOOD }, ["ci.yml"]);
+  const ok = await simulate(t, PULL_REQUEST, { creds: GOOD }, { workflows: ["ci.yml"] });
   assert.equal(ciJob(ok, "image").status, "success", ok.output);
   assert.ok(ok.calls.some((c) => c.startsWith(`docker image inspect `) && c.endsWith(` ${PR_TAG}`)), ok.calls.join("\n"));
   assert.equal(ciJob(ok, "ci-result").status, "success", ok.output);
@@ -312,7 +403,7 @@ test("the pull-request image job fails when the built image's manifest or metada
     ],
   ];
   for (const [what, env, message] of faults) {
-    const bad = await simulate(t, PULL_REQUEST, { creds: GOOD }, ["ci.yml"], env);
+    const bad = await simulate(t, PULL_REQUEST, { creds: GOOD }, { workflows: ["ci.yml"], env });
     const image = ciJob(bad, "image");
     assert.equal(image.status, "failure", `an image with ${what} must fail the pull-request image job`);
     assert.match(image.steps.at(-1)!.output, message, `${what}: ${bad.output}`);
@@ -320,32 +411,90 @@ test("the pull-request image job fails when the built image's manifest or metada
   }
 });
 
+/** A pull-request workflow that reaches for each credential source the pull-request image job must never touch. */
+const PROBE_WORKFLOW = `name: probe
+on:
+  pull_request:
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  oidc:
+    runs-on: ubuntu-latest
+    steps:
+      - run: node -e 'fetch(process.env.ACTIONS_ID_TOKEN_REQUEST_URL + "&audience=openbao", { headers: { authorization: "Bearer " + process.env.ACTIONS_ID_TOKEN_REQUEST_TOKEN } }).then((r) => process.exit(r.ok ? 0 : 1))'
+  openbao:
+    runs-on: ubuntu-latest
+    env:
+      OPENBAO_ADDR: \${{ vars.OPENBAO_ADDR }}
+    steps:
+      - run: node -e 'fetch(process.env.OPENBAO_ADDR + "/v1/auth/jwt/login", { method: "POST", body: "{}" }).then((r) => process.exit(r.ok ? 0 : 1))'
+  registry:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo token | docker login ${REGISTRY} -u probe --password-stdin
+  mount:
+    runs-on: ubuntu-latest
+    steps:
+      - run: test -n "$(cat "$REGISTRY_PUSH_DIR/password")"
+  secret:
+    runs-on: ubuntu-latest
+    env:
+      TOKEN: \${{ secrets.ACR_PUSH_PASSWORD }}
+    steps:
+      - run: test -n "$TOKEN"
+`;
+
 test("pull-request runs never contact OpenBao, and ci-result needs the image job", async (t) => {
-  const pr = await simulate(t, PULL_REQUEST, { creds: GOOD });
+  // The tripwires work: each forbidden credential access from a pull request
+  // fails the job that tries it and is recorded.
+  const probeWs = mkdtempSync(join(tmpdir(), "probe-"));
+  t.after(() => rmSync(probeWs, { recursive: true, force: true }));
+  mkdirSync(join(probeWs, ".github", "workflows"), { recursive: true });
+  writeFileSync(join(probeWs, ".github", "workflows", "probe.yml"), PROBE_WORKFLOW);
+  const probe = await simulate(t, PULL_REQUEST, { creds: GOOD, tripwires: true }, { workspace: probeWs });
+  assert.deepEqual(
+    probe.jobs.map((j) => `${j.job} ${j.status}`),
+    ["oidc failure", "openbao failure", "registry failure", "mount failure", "secret failure"],
+    probe.output,
+  );
+  assert.deepEqual(
+    [...probe.access].sort(),
+    ["mount password", "oidc GET /oidc", "openbao POST /v1/auth/jwt/login", "registry login", "secret ACR_PUSH_PASSWORD"],
+    "every forbidden access is recorded",
+  );
+
+  // Every workflow a pull request triggers, run whole under the same
+  // tripwires: everything passes and no credential access was recorded.
+  const pr = await simulate(t, PULL_REQUEST, { creds: GOOD, tripwires: true });
   assert.deepEqual(pr.jobs.filter((j) => j.workflow !== "ci.yml"), [], "only ci.yml runs for a pull request");
-  assert.deepEqual(pr.requests, [], "no OIDC token endpoint or OpenBao request");
+  assert.deepEqual(
+    pr.jobs.map((j) => `${j.job} ${j.status}`),
+    ["test success", "image success", "ci-result success"],
+    pr.output,
+  );
+  assert.deepEqual(pr.access, [], "no OIDC, OpenBao, registry, runner-mount or secrets access");
   for (const j of pr.jobs) {
     assert.equal(j.oidcOffered, false, `${j.workflow}/${j.job} cannot mint an OIDC token`);
     assert.ok(!JSON.stringify(j.runsOn).includes("self-hosted"), `${j.workflow}/${j.job} stays off self-hosted runners`);
   }
-  // The image job talks to docker only to build and inspect locally: no
-  // registry login, push or pull, and nothing from the runner mount decoy.
+  // The image job talks to docker only to build and inspect locally.
   assert.deepEqual(
     pr.calls.filter((c) => c.startsWith("docker ")).map((c) => c.split(" ").slice(0, 3).join(" ")),
     ["docker build -f", "docker image inspect"],
     pr.calls.join("\n"),
   );
-  assert.doesNotMatch(pr.calls.join("\n") + pr.output, /mounted-/, "no runner-mounted credential is restored");
-  // What ci.yml declares and runs (comments aside) names no credential source.
-  const ciSource = readFileSync(resolve(workflowsDir, "ci.yml"), "utf8")
-    .split("\n")
-    .filter((l) => !l.trim().startsWith("#"))
-    .join("\n");
-  for (const forbidden of [/OPENBAO/, /id-token/, /estate-registry-credential/, /REGISTRY_PUSH_DIR|\/etc\/registry-push/, /secrets\./]) {
-    assert.doesNotMatch(ciSource, forbidden, `ci.yml references ${forbidden}`);
-  }
 
-  // ci-result needs the image job and is the strict required check on main.
+  // ci-result needs the image job: it runs after it, and an image job that
+  // fails fails ci-result, the strict required check on main.
+  const bad = await simulate(t, PULL_REQUEST, { creds: GOOD, tripwires: true }, { env: { FAKE_DOCKER_PLATFORM: "linux/arm64" } });
+  assert.deepEqual(
+    bad.jobs.map((j) => `${j.job} ${j.status}`),
+    ["test success", "image failure", "ci-result failure"],
+    bad.output,
+  );
+  assert.match(ciJob(bad, "ci-result").steps.at(-1)!.output, /a required job ended 'failure'/);
+  assert.deepEqual(bad.access, [], "a failing image job still makes no credential access");
   const ci = jobsOf("ci.yml");
   assert.ok((ci["ci-result"]!.needs as string[]).includes("image"), "ci-result needs image");
   const protection = JSON.parse(readFileSync(resolve(repoRoot, "devops", "github", "branch-protection.json"), "utf8")) as {
@@ -353,5 +502,4 @@ test("pull-request runs never contact OpenBao, and ci-result needs the image job
   };
   assert.equal(protection.required_status_checks.strict, true, "main's protection stays strict");
   assert.ok(protection.required_status_checks.contexts.includes("ci-result"), "ci-result stays the required check");
-  assert.equal(ciJob(pr, "ci-result").status, "success", pr.output);
 });

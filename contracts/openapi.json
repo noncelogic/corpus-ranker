@@ -1261,6 +1261,10 @@
           },
           "source_blind": {
             "type": "boolean"
+          },
+          "scored_at": {
+            "$ref": "schemas/v1/common.schema.json#/$defs/timestamp",
+            "description": "When the score was made, for a score recorded after the fact (SPEC A7 Phase 0 import). Must not be in the future; omitted, the score is dated when it is recorded."
           }
         }
       },

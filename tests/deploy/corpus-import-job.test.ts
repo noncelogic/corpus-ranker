@@ -12,8 +12,11 @@
 // temp dir: the init container's shell command under `sh`, then the importer's
 // entry module (src/import/corpus-import-job.ts, which the image ships as
 // dist/import/corpus-import-job.js) against a local HTTP server standing in
-// for ranker-api. The stand-in checks each request against the frozen
-// contract and answers capture content-addressed (201 new, 200 same bytes).
+// for ranker-api. The stand-in checks capture against the frozen contract and
+// answers it content-addressed (201 new, 200 same bytes); score posts go
+// through the service's own handler (src/api/score.ts) over an in-memory
+// store, so its contract check and the scored_at it would store are the real
+// ones.
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
@@ -23,7 +26,10 @@ import { createServer, type IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
+import { score as scoreHandler } from "../../src/api/score.ts";
 import { loadContracts, openapiUri } from "../../src/contracts/index.ts";
+import type { Queryable } from "../../src/db/client.ts";
+import { paperRubricV1 } from "../../src/import/paper-rubric.ts";
 import { deployDir, kustomizeBuild, parseYamlDocs, renderObjects, repoRoot, type K8sObject } from "./render.ts";
 
 const NAMESPACE = "corpus-ranker";
@@ -117,15 +123,25 @@ function stageExport(): string {
 interface Call {
   kind: "capture" | "score";
   body: any;
+  /** The stand-in's answer. */
+  body_out: any;
   auth: string | undefined;
   status: number;
+}
+
+interface StoredScore {
+  item_id: string;
+  scorer: unknown;
+  scored_at: string;
 }
 
 interface FakeApi {
   url: string;
   calls: Call[];
-  /** Answer the score post for this arXiv ID's Item with this status. */
-  failScoreFor: Map<string, number>;
+  /** Score events as the handler's insert would store them, by id. */
+  stored: Map<string, StoredScore>;
+  /** arXiv IDs whose Item the ranker does not hold (the handler answers 404). */
+  missingItems: Set<string>;
   close: () => Promise<void>;
 }
 
@@ -133,10 +149,40 @@ const registry = loadContracts().registry;
 const shortId = (prefix: string, ...parts: string[]) =>
   `${prefix}${createHash("sha256").update(parts.join("\0")).digest("hex").slice(0, 24)}`;
 
+const NOW = new Date("2026-11-20T12:00:00Z");
+const policy = paperRubricV1({ corpusId: "cr_corpus_papers", createdBy: "joe", createdAt: "2026-10-01T00:00:00Z" });
+
+/**
+ * The ranker database as the score handler queries it: the paper-rubric v1
+ * Policy, every Item but the missing ones, and score_events inserts kept as
+ * their parameters would be stored.
+ */
+function scoreDb(stored: Map<string, StoredScore>, missingItems: Set<string>): Queryable {
+  return {
+    async query(text: string, params: readonly unknown[] = []) {
+      if (/^\s*select json_build_object/.test(text)) {
+        const [policyId, version, itemId] = params as [string, number, string];
+        const exists = policyId === policy.id;
+        const missing = [...missingItems].some((arxiv) => shortId("cr_item_", "cr_corpus_papers", arxiv) === itemId);
+        return [{ found: { policy: exists && version === 1 ? policy : null, policy_exists: exists, item_exists: !missing } }] as any;
+      }
+      if (/^\s*insert into score_events/.test(text)) {
+        const [id, itemId, , , , scorer, scoredAt] = params as string[];
+        stored.set(id!, { item_id: itemId!, scorer: JSON.parse(scorer!), scored_at: new Date(scoredAt!).toISOString() });
+        return [{ id }] as any;
+      }
+      throw new Error(`unexpected query: ${text}`);
+    },
+  };
+}
+
 async function fakeApi(): Promise<FakeApi> {
   const held = new Map<string, string>(); // corpus + hash -> original id
   const calls: Call[] = [];
-  const failScoreFor = new Map<string, number>();
+  const stored = new Map<string, StoredScore>();
+  const missingItems = new Set<string>();
+  const db = scoreDb(stored, missingItems);
+  let scoreSeq = 0;
   const read = (req: IncomingMessage) =>
     new Promise<string>((ok) => {
       const chunks: Buffer[] = [];
@@ -148,7 +194,7 @@ async function fakeApi(): Promise<FakeApi> {
     const path = new URL(req.url ?? "/", "http://x").pathname;
     const auth = req.headers.authorization;
     const answer = (kind: Call["kind"], status: number, out: unknown) => {
-      calls.push({ kind, body, auth, status });
+      calls.push({ kind, body, body_out: out, auth, status });
       res.writeHead(status, { "content-type": "application/json" }).end(JSON.stringify(out));
     };
     const capture = CORPUS.exec(path);
@@ -163,14 +209,9 @@ async function fakeApi(): Promise<FakeApi> {
       return answer("capture", existing ? 200 : 201, { id, corpus_id: capture[1], content_hash: hash });
     }
     if (req.method === "POST" && path === "/v1/scores") {
-      // The frozen ScoreRequest carries no date; the import also sends the
-      // file's scored_at, checked here on its own (see the summary for CRANK-95).
-      const { scored_at, ...rest } = body;
-      const problems = registry.validate(rest, `${openapiUri()}#/components/schemas/ScoreRequest`);
-      if (problems.length > 0 || typeof scored_at !== "string") return answer("score", 400, { error: "invalid_request" });
-      const forced = [...failScoreFor].find(([arxiv]) => shortId("cr_item_", "cr_corpus_papers", arxiv) === body.item_id);
-      if (forced) return answer("score", forced[1], { error: "item_not_found" });
-      return answer("score", 201, { score_event_id: `cr_score_${calls.length}` });
+      // The service's own handler: its contract check, policy rules and insert.
+      const out = await scoreHandler(raw, { db, now: () => NOW, newId: () => `cr_score_${++scoreSeq}` });
+      return answer("score", out.status, out.body);
     }
     res.writeHead(404).end("{}");
   });
@@ -179,7 +220,8 @@ async function fakeApi(): Promise<FakeApi> {
   return {
     url: `http://127.0.0.1:${port}`,
     calls,
-    failScoreFor,
+    stored,
+    missingItems,
     close: () => new Promise((ok) => server.close(() => ok())),
   };
 }
@@ -304,7 +346,13 @@ test("the rendered import Job mounts juno-papers-export read-only, checks SHA256
     // Scorer and date come from the file.
     const expectedScorer = rec.model ? { identity: rec.scorer, model: rec.model } : { identity: rec.scorer };
     assert.deepEqual(sc.body.scorer, expectedScorer, "the file's scorer is kept");
-    assert.equal(sc.body.scored_at, rec.scored_at!.length === 10 ? `${rec.scored_at}T00:00:00Z` : rec.scored_at, "the file's date is kept");
+    assert.equal(sc.status, 201, `the ranker records the score (${rec.arxiv_id})`);
+    const fileDate = new Date(rec.scored_at!.length === 10 ? `${rec.scored_at}T00:00:00Z` : rec.scored_at!).toISOString();
+    assert.deepEqual(
+      api.stored.get(sc.body_out.score_event_id),
+      { item_id: sc.body.item_id, scorer: expectedScorer, scored_at: fileDate },
+      "the ranker stores the file's scorer and date, not the time of the import",
+    );
   }
   assert.equal(i, api.calls.length);
 
@@ -325,13 +373,13 @@ test("the rendered import Job mounts juno-papers-export read-only, checks SHA256
 
   // --- must_catch: a score answered 4xx is not counted as imported ------------
   api.calls.length = 0;
-  api.failScoreFor.set("2610.43001", 404);
+  api.missingItems.add("2610.43001");
   const failing = await runJob(job, dir, api);
   assert.notEqual(failing.status, 0, "a refused score post fails the Job");
   assert.match(failing.output, new RegExp(`"scores":${scored - 1}\\b`), "the refused score is not counted");
   assert.match(failing.output, /"failed":1\b/);
   assert.doesNotMatch(failing.output, /PRIVATE-ABSTRACT|Secret Title|2610\.\d{5}/);
-  api.failScoreFor.clear();
+  api.missingItems.clear();
 
   // --- must_catch: a SHA256SUMS mismatch posts nothing ------------------------
   api.calls.length = 0;

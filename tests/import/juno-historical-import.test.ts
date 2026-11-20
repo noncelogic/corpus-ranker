@@ -119,7 +119,7 @@ test("a score by juno:weekly-aggregation-triage under the published paper-rubric
   const fixture = await freshDatabase(t);
   const db = pgClient(fixture.databaseUrl());
   t.after(() => db.end());
-  const store = { async put() {}, async get() { return null; }, uri(key: string) { return `test:${key}`; } };
+  const store = { async put() {}, async get() { return null; }, uri(key: string) { return `test:${key}`; }, async ping() {} };
   // The history import publishes paper-rubric v1 into the store.
   await importHistoricalExport(dir, db, store);
   const itemId = fixture.psql("select id from items where corpus_id='cr_corpus_papers' limit 1");

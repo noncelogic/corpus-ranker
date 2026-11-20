@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { pgClient } from "../../src/db/client.ts";
-import { importHistoricalExport, readHistoricalExport } from "../../src/import/juno-historical-import.ts";
+import { DAILY_FILE, importHistoricalExport, readHistoricalExport } from "../../src/import/juno-historical-import.ts";
 import { WEEKLY_FILES } from "../../src/import/corpus-import-job.ts";
 import { freshDatabase } from "../schema/fresh-db.ts";
 
@@ -50,4 +50,26 @@ test("Juno backfill initializes an empty papers corpus and is safe to rerun", as
   assert.equal(blobs.size, 1);
   assert.equal(fixture.psql("select count(*) from item_originals"), "1");
   assert.equal(fixture.psql("select count(*) from score_events where scorer->>'identity' = 'unknown'"), "1");
+});
+
+test("daily mode requires recorded judge provenance before any production write", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "ranker-daily-batch-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const legacy = { arxiv_id: "2610.01234", title: "Applied research", first_seen: "2026-10-05", relevance: 5, technical_merit: 4 };
+  function write(record: unknown) {
+    const line = JSON.stringify(record) + "\n";
+    writeFileSync(join(dir, DAILY_FILE), line);
+    writeFileSync(join(dir, "SHA256SUMS"), `${createHash("sha256").update(line).digest("hex")}  ${DAILY_FILE}\n`);
+  }
+  write(legacy);
+  assert.throws(() => readHistoricalExport(dir, [DAILY_FILE], true), /paper judge identity, model and a valid scoring timestamp/);
+  write({
+    ...legacy,
+    scorer: { identity: "program:paper-judge", model: "test-fixture-model" },
+    scored_at: "2026-10-05T04:00:00Z",
+  });
+  const { events } = readHistoricalExport(dir, [DAILY_FILE], true);
+  assert.equal(events[0]?.scorer.model, "test-fixture-model");
+  assert.equal(events[0]?.scorer.config?.scored_at_provenance, "recorded");
+  assert.deepEqual(events[0]?.dimension_scores.map(({ value }) => value), [5, 4]);
 });

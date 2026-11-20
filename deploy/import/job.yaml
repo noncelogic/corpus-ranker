@@ -6,7 +6,12 @@
 # importer cannot start unless it passes, and re-checks the sums itself before
 # posting anything. Each record is captured (content-addressed: a re-run
 # creates no duplicate Originals), then its paper-rubric v1 score posted with
-# the scorer and date from the file. The log holds counts only, never record
+# the scorer and date from the file. Juno's weekly records name neither
+# (relevance / technical_merit are top-level numbers): they are scored with
+# the declared scorer below and scored_at = first_seen, the date of the
+# aggregation run whose triage lanes scored them. The provenance is stated as
+# reconstructed; the per-run triage outputs, merge summaries and run logs stay
+# on Juno's host. The log holds counts only, never record
 # contents; any failed post fails the Job. backoffLimit 0: a failed run is
 # looked at, not retried, since a retry would post every score again.
 #
@@ -65,6 +70,9 @@ spec:
               value: cr_corpus_papers
             - name: RANKER_IMPORT_CAPTURED_BY
               value: agent:corpus-import
+            # Scorer for records that name none (Juno's weekly shape).
+            - name: RANKER_IMPORT_DECLARED_SCORER
+              value: '{"identity":"juno:weekly-aggregation-triage","config":{"rubric":"paper-rubric v1","scored_at_from":"first_seen","provenance":"reconstructed"}}'
             # The owner's principal, the only key CR-D1-DEC-PRINCIPALS
             # authorises (OpenBao kv/corpus-ranker/api-keys).
             - name: RANKER_API_KEY

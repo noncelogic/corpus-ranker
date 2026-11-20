@@ -13,7 +13,7 @@ import { readDimensionScores, readScoredAt, readScorer } from "./score-import.ts
 const corpusId = "cr_corpus_papers";
 const importer = "agent:juno-historical-import";
 export const DAILY_FILE = "papers-daily.jsonl";
-const policy = paperRubricV1({
+export const publishedPaperRubricV1 = paperRubricV1({
   corpusId,
   createdAt: "2026-10-05T00:00:00Z",
   createdBy: importer,
@@ -22,8 +22,12 @@ const policy = paperRubricV1({
     { kind: "llm_judge", identity: "program:paper-judge" },
     // This is a provenance marker, not a claim about who assigned a score.
     { kind: "program", identity: "unknown" },
+    // The corpus import Job's declared scorer (deploy/import/job.yaml,
+    // RANKER_IMPORT_DECLARED_SCORER) for records that name none (CRANK-238).
+    { kind: "program", identity: "juno:weekly-aggregation-triage" },
   ],
 });
+const policy = publishedPaperRubricV1;
 
 export function readHistoricalExport(dir: string, files = WEEKLY_FILES, daily = false) {
   verifyExport(dir, files);

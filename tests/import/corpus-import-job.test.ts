@@ -19,6 +19,7 @@ import { test, type TestContext } from "node:test";
 import { score as scoreHandler } from "../../src/api/score.ts";
 import type { Queryable } from "../../src/db/client.ts";
 import { parseDeclaredScorer, runCorpusImport } from "../../src/import/corpus-import-job.ts";
+import { publishedPaperRubricV1 } from "../../src/import/juno-historical-import.ts";
 import { paperRubricV1 } from "../../src/import/paper-rubric.ts";
 import { deployDir, parseYamlDocs } from "../deploy/render.ts";
 
@@ -186,4 +187,16 @@ test("the import Job declares the scorer for records that name none", () => {
     "the config states the provenance as reconstructed from first_seen",
   );
   assert.throws(() => parseDeclaredScorer("{}"), /no identity/);
+});
+
+test("the scorer the import Job declares in deploy/import/job.yaml is admitted by the paper-rubric v1 the history import publishes", () => {
+  const [job] = parseYamlDocs(readFileSync(join(deployDir, "import", "job.yaml"), "utf8")) as any[];
+  const env = job.spec.template.spec.containers[0].env as Array<{ name: string; value?: string }>;
+  const declared = parseDeclaredScorer(env.find((e) => e.name === "RANKER_IMPORT_DECLARED_SCORER")!.value!);
+  assert.equal(declared.config?.rubric, "paper-rubric v1");
+  assert.deepEqual([publishedPaperRubricV1.id, publishedPaperRubricV1.version], ["cr_pol_paper", 1]);
+  assert.ok(
+    publishedPaperRubricV1.judge_config.allowed_scorers.some((a) => a.identity === declared.identity),
+    `${declared.identity} is among the published v1 allowed scorers`,
+  );
 });

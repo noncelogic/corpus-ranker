@@ -45,15 +45,27 @@ declares their attachment to `eso-obs`, in that order, add-only: the role's
 existing policies, among them the estate-held grant on the ranker's ACR pull
 credential `kv/corpus-ranker/acr-pull` (meta-harness
 devops/aks/corpus-ranker-argo/README.md), stay attached.
-The estate apply is CRANK-188:
+The estate apply is CRANK-188, one command, logged in to OpenBao with rights
+to read and write policies and the role:
 
 ```sh
-bao policy write external-secrets-corpus-ranker-minio devops/openbao/policies/external-secrets-corpus-ranker-minio.hcl
-bao policy write external-secrets-corpus-ranker devops/openbao/policies/external-secrets-corpus-ranker.hcl
-# add, never replace: append the two names to the role's current token_policies
-bao read -field=token_policies auth/kubernetes/role/eso-obs
-bao write auth/kubernetes/role/eso-obs token_policies=<current>,external-secrets-corpus-ranker-minio,external-secrets-corpus-ranker
+node deploy/openbao/attach-eso.ts
 ```
+
+It snapshots the live role, writes each declared policy whose stored text is
+not byte-identical to its file (the file's bytes on stdin), appends only the
+names missing from the role's `token_policies` after the existing ones
+(`eso-sync` and the rest keep their order), never creates the role, never writes another
+policy, then reads back both the policy bytes and the role: `token_policies`
+must be the snapshot's list followed by the appended names, and every other
+role setting must equal the snapshot (exit 1 names each difference, exit 2 a
+failed read or write or an absent role). A second run writes nothing. Its last
+stdout line is a JSON record (role, `token_policies` before and after, the
+appended names, each policy file's sha256, `settings_preserved`) that goes
+into meta-harness devops/openbao/README.md as the deploy record.
+`tests/deploy/external-secrets.test.ts` ("the ExternalSecret store role names
+both exact-path corpus-ranker read policies") runs it against a throwaway
+OpenBao holding the role as the estate does before the apply.
 
 After applying, read the attachment back and check it (exit 1 names each
 difference: a manifest policy missing from the role's `token_policies`, an

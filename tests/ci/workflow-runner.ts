@@ -8,8 +8,9 @@
 //     `if:` without one is implicitly `success() && ...`), and the needs
 //     context as `needs.<id>.result` and `join(needs.*.result, '<sep>')`;
 //   - workflow/job/step `env:` and `${{ vars.* | secrets.* | github.* }}`
-//     substitution in env values and `run:` scripts;
-//   - GITHUB_* defaults, RUNNER_TEMP, and the OIDC request variables
+//     substitution in env values and `run:` scripts; every `secrets.*` read
+//     is reported to the caller (onSecretRead);
+//   - GITHUB_* defaults (GITHUB_WORKFLOW, GITHUB_JOB, ...), RUNNER_TEMP, and the OIDC request variables
 //     (ACTIONS_ID_TOKEN_REQUEST_URL/TOKEN), which are exposed only to a job
 //     whose effective permissions grant `id-token: write`;
 //   - `run:` steps written to a file and run with `bash -e <file>` from the
@@ -50,6 +51,8 @@ export interface RunnerOptions {
   hostEnv: Record<string, string>;
   /** The OIDC token endpoint the runner offers to jobs granted `id-token: write`. */
   oidc?: { url: string; token: string };
+  /** Called with the name of every `secrets.<name>` an expression reads (a credential-access record). */
+  onSecretRead?: (name: string) => void;
 }
 
 export interface StepRun {
@@ -99,6 +102,7 @@ interface Context {
   repository: string;
   vars: Record<string, string>;
   secrets: Record<string, string>;
+  onSecretRead?: (name: string) => void;
   /** Results of the current job's direct needs, by job id, in `needs:` order. */
   needs?: Record<string, string>;
   /** What success() and failure() return where the expression is evaluated. */
@@ -115,7 +119,10 @@ function operand(raw: string, ctx: Context): string | boolean {
   if ((m = /^'((?:[^']|'')*)'$/.exec(s))) return m[1]!.replace(/''/g, "'");
   if (s === "true" || s === "false") return s === "true";
   if ((m = /^vars\.([A-Za-z_]\w*)$/.exec(s))) return ctx.vars[m[1]!] ?? "";
-  if ((m = /^secrets\.([A-Za-z_]\w*)$/.exec(s))) return ctx.secrets[m[1]!] ?? "";
+  if ((m = /^secrets\.([A-Za-z_]\w*)$/.exec(s))) {
+    ctx.onSecretRead?.(m[1]!);
+    return ctx.secrets[m[1]!] ?? "";
+  }
   const github: Record<string, string> = {
     "github.event_name": ctx.event.name,
     "github.ref": ctx.event.ref,
@@ -197,7 +204,13 @@ const NOOP_ACTIONS = new Set(["actions/checkout", "actions/setup-node"]);
 
 /** Run every job of every workflow the event triggers; returns each job's outcome (skipped jobs included). */
 export async function runEvent(opts: RunnerOptions): Promise<JobRun[]> {
-  const ctx: Context = { event: opts.event, repository: opts.repository, vars: opts.vars ?? {}, secrets: opts.secrets ?? {} };
+  const ctx: Context = {
+    event: opts.event,
+    repository: opts.repository,
+    vars: opts.vars ?? {},
+    secrets: opts.secrets ?? {},
+    onSecretRead: opts.onSecretRead,
+  };
   const files = opts.workflows ?? readdirSync(opts.workflowsDir).filter((f) => /\.ya?ml$/.test(f)).sort();
   const runs: JobRun[] = [];
   for (const file of files) {
@@ -259,6 +272,8 @@ async function runJob(
       GITHUB_REF: ctx.event.ref,
       GITHUB_SHA: ctx.event.sha,
       GITHUB_REPOSITORY: ctx.repository,
+      GITHUB_WORKFLOW: String(workflow.name ?? file),
+      GITHUB_JOB: id,
       GITHUB_WORKSPACE: opts.workspace,
       RUNNER_TEMP: runnerTemp,
       ...(oidcOffered ? { ACTIONS_ID_TOKEN_REQUEST_URL: opts.oidc!.url, ACTIONS_ID_TOKEN_REQUEST_TOKEN: opts.oidc!.token } : {}),

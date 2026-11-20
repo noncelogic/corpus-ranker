@@ -47,11 +47,11 @@ jobs:
         with:
           persist-credentials: false
       - name: Build
+        # The one build definition ci.yml's `image` job (DRY_RUN_OF: image)
+        # proves on every pull request.
         run: |
-          docker build \
-            --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
-            --label "org.opencontainers.image.revision=${GITHUB_SHA}" \
-            -t "${IMAGE}:sha-${GITHUB_SHA}" .
+          . .github/scripts/image-build.sh
+          image_build "${IMAGE}:sha-${GITHUB_SHA}"
       - name: Publish
         env:
           OPENBAO_ADDR: ${{ vars.OPENBAO_ADDR }}

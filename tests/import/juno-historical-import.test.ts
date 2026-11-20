@@ -50,6 +50,19 @@ test("Juno backfill initializes an empty papers corpus and is safe to rerun", as
   assert.equal(blobs.size, 1);
   assert.equal(fixture.psql("select count(*) from item_originals"), "1");
   assert.equal(fixture.psql("select count(*) from score_events where scorer->>'identity' = 'unknown'"), "1");
+  const transition = JSON.stringify({
+    arxiv_id: "2610.01234", title: "Research paper, published", first_seen: "2026-10-06",
+    relevance: 5, technical_merit: 4, version: "v2", published: true,
+    journal_ref: "Example journal", supersedes: "2610.01234v1",
+    scorer: { identity: "program:paper-judge", model: "test-fixture-model" },
+    scored_at: "2026-10-06T04:00:00Z",
+  }) + "\n";
+  writeFileSync(join(dir, DAILY_FILE), transition);
+  writeFileSync(join(dir, "SHA256SUMS"), `${createHash("sha256").update(transition).digest("hex")}  ${DAILY_FILE}\n`);
+  assert.deepEqual(await importHistoricalExport(dir, db, store, true), expected);
+  assert.deepEqual(await importHistoricalExport(dir, db, store, true), expected);
+  assert.equal(fixture.psql("select count(*) from items where corpus_id='cr_corpus_papers'"), "2");
+  assert.equal(fixture.psql("select count(*) from edges where edge_type='supersedes'"), "1");
 });
 
 test("daily mode requires recorded judge provenance before any production write", (t) => {
@@ -72,4 +85,28 @@ test("daily mode requires recorded judge provenance before any production write"
   assert.equal(events[0]?.scorer.model, "test-fixture-model");
   assert.equal(events[0]?.scorer.config?.scored_at_provenance, "recorded");
   assert.deepEqual(events[0]?.dimension_scores.map(({ value }) => value), [5, 4]);
+});
+
+test("daily publication transitions retain their own item alongside the preprint", (t) => {
+  const dir = exportDirectory();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const score = {
+    arxiv_id: "2610.01234", title: "Applied research", first_seen: "2026-10-05",
+    relevance: 5, technical_merit: 4, scored_at: "2026-10-05T04:00:00Z",
+    scorer: { identity: "program:paper-judge", model: "test-fixture-model" },
+  };
+  const data = [
+    { ...score, version: "v1" },
+    { ...score, version: "v2", published: true, journal_ref: "Example journal", supersedes: "2610.01234v1" },
+  ].map((record) => JSON.stringify(record)).join("\n") + "\n";
+  writeFileSync(join(dir, DAILY_FILE), data);
+  writeFileSync(join(dir, "SHA256SUMS"), `${createHash("sha256").update(data).digest("hex")}  ${DAILY_FILE}\n`);
+  const { corpus, events } = readHistoricalExport(dir, [DAILY_FILE], true);
+  assert.equal(corpus.items().length, 2);
+  const preprint = corpus.itemByArxivId(score.arxiv_id);
+  const publication = corpus.items().find((item) => item.identity_keys.publication_version === "v2");
+  assert.ok(preprint && publication);
+  assert.notEqual(preprint.id, publication.id);
+  assert.equal(publication.canonical_fields.supersedes, "2610.01234v1");
+  assert.equal(new Set(events.map((e) => e.item_id)).size, 2);
 });

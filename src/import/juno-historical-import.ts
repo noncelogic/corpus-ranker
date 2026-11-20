@@ -12,6 +12,7 @@ import { readDimensionScores, readScoredAt, readScorer } from "./score-import.ts
 
 const corpusId = "cr_corpus_papers";
 const importer = "agent:juno-historical-import";
+export const DAILY_FILE = "papers-daily.jsonl";
 const policy = paperRubricV1({
   corpusId,
   createdAt: "2026-10-05T00:00:00Z",
@@ -24,7 +25,7 @@ const policy = paperRubricV1({
   ],
 });
 
-export function readHistoricalExport(dir: string, files = WEEKLY_FILES) {
+export function readHistoricalExport(dir: string, files = WEEKLY_FILES, daily = false) {
   verifyExport(dir, files);
   const corpus = new CorpusStore();
   const rawByHash = new Map<string, Buffer>();
@@ -33,7 +34,7 @@ export function readHistoricalExport(dir: string, files = WEEKLY_FILES) {
   for (const file of files) {
     const bytes = readFileSync(join(dir, file));
     const report = importPapersJsonl(bytes, corpus, {
-      corpusId, source: file, importedBy: importer, now: new Date().toISOString(), storageUriPrefix: "staged:",
+      corpusId, source: file, importedBy: daily ? "agent:research-aggregation" : importer, now: new Date().toISOString(), storageUriPrefix: "staged:",
     });
     if (report.errors.length) throw new Error(`${file}: ${report.errors.length} invalid paper record(s)`);
     records += report.records;
@@ -43,13 +44,19 @@ export function readHistoricalExport(dir: string, files = WEEKLY_FILES) {
   }
   const events = corpus.items().flatMap((item) => item.original_ids.map((id) => {
     const record = corpus.original(id)!.raw_metadata;
-    const dimensions = readDimensionScores(record, {}, [{ id }], "Juno historical score");
+    const dimensions = readDimensionScores(
+      record, {}, [{ id }], daily ? "Hermes daily research score" : "Juno historical score",
+    );
     if (typeof dimensions === "string" || dimensions.length !== 2) {
-      throw new Error("Historical record must have both numeric paper-rubric dimensions");
+      throw new Error("Paper record must have both numeric paper-rubric dimensions");
     }
     const suppliedScorer = readScorer(record);
     const suppliedDate = readScoredAt(record);
     const dateKnown = typeof suppliedDate === "string";
+    if (daily && (typeof suppliedScorer === "string" || suppliedScorer.identity !== "program:paper-judge" ||
+        !suppliedScorer.model || !dateKnown || Date.parse(suppliedDate) > Date.now())) {
+      throw new Error("Daily scores require the paper judge identity, model and a valid scoring timestamp");
+    }
     const scorer = typeof suppliedScorer === "string" ? { identity: "unknown" } : suppliedScorer;
     // Juno confirmed first_seen is the scoring run's admission date. Use it
     // for ordering only and disclose that the actual scoring time is unknown.
@@ -73,8 +80,9 @@ export function readHistoricalExport(dir: string, files = WEEKLY_FILES) {
   return { records, corpus, events, rawByHash };
 }
 
-export async function importHistoricalExport(dir: string, db: Db, store: ObjectStore) {
-  const { records, corpus, events, rawByHash } = readHistoricalExport(dir);
+export async function importHistoricalExport(dir: string, db: Db, store: ObjectStore, daily = false) {
+  const files = daily ? [DAILY_FILE] : WEEKLY_FILES;
+  const { records, corpus, events, rawByHash } = readHistoricalExport(dir, files, daily);
   const originals = corpus.originals();
   const items = corpus.items();
   // Content-addressed objects can be uploaded again after an interrupted run.
@@ -133,8 +141,9 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     return value;
   }
   const dir = required("RANKER_IMPORT_DIR");
+  const daily = process.argv.includes("--daily");
   if (process.argv.includes("--check")) {
-    const { records, corpus, events } = readHistoricalExport(dir);
+    const { records, corpus, events } = readHistoricalExport(dir, daily ? [DAILY_FILE] : WEEKLY_FILES, daily);
     console.log(JSON.stringify({ records, items: corpus.items().length, scores: events.length }));
   } else {
     const db = pgClient(required("RANKER_DATABASE_URL"));
@@ -143,7 +152,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
         endpoint: required("RANKER_S3_ENDPOINT"), bucket: required("RANKER_S3_BUCKET"),
         accessKeyId: required("RANKER_S3_ACCESS_KEY_ID"), secretAccessKey: required("RANKER_S3_SECRET_ACCESS_KEY"),
       });
-      console.log(JSON.stringify(await importHistoricalExport(dir, db, store)));
+      console.log(JSON.stringify(await importHistoricalExport(dir, db, store, daily)));
     } catch (error) {
       console.error(`Historical import failed: ${error instanceof Error ? error.name : "unknown error"}`);
       process.exitCode = 1;

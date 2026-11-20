@@ -135,9 +135,8 @@ test("kustomize build renders and the API Rollout env names match the frozen con
 test("manifests target namespace corpus-ranker with CNPG, MinIO, ExternalSecrets and no ingress", () => {
   const docs = renderDocs();
   find("Namespace", "corpus-ranker");
-  // The one exception is the Argo CD Application, in Argo CD's namespace (tests/deploy/rollout-manifests.test.ts).
-  assert.equal(find("Application", "corpus-ranker").namespace, "argocd");
-  for (const doc of docs.filter((d) => d.kind !== "Namespace" && d.kind !== "Application")) {
+  // No exception: the overlay renders no Argo CD Application (tests/deploy/rollout-manifests.test.ts).
+  for (const doc of docs.filter((d) => d.kind !== "Namespace")) {
     assert.equal(doc.namespace, "corpus-ranker", `${doc.kind}/${doc.name} is not in namespace corpus-ranker`);
   }
 

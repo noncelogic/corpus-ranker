@@ -5,12 +5,16 @@
 # from the estate OpenBao ClusterSecretStore, database passwords generated in-cluster.
 #
 # Manifests only. No CI step applies these; rollout is estate-side GitOps:
-# the Argo CD Application in argocd/application.yaml tracks this overlay on
-# aks-obs-01. Render locally with:  kustomize build deploy/
+# the estate Argo CD Application argocd/corpus-ranker (meta-harness
+# devops/aks/corpus-ranker-argo/application.yaml: AppProject corpus-ranker,
+# prune off, the image pin and the OpenBao Job patches) tracks this overlay
+# on aks-obs-01 and is its one definition. This overlay renders no
+# Application (CR-ARGO-APP-OUT): AppProject corpus-ranker permits only
+# namespace corpus-ranker, and a repo-side Application would replace the
+# estate spec. Render locally with:  kustomize build deploy/
 #
-# Namespaces are explicit on every resource (corpus-ranker; the Application
-# in argocd), not set by a kustomize `namespace:` field, which would also
-# move the Application out of Argo CD's namespace.
+# Every rendered namespaced object is in namespace corpus-ranker, set
+# explicitly on each resource (tests/deploy/rollout-manifests.test.ts).
 # No Ingress: the API is reachable estate-internally via its ClusterIP Service.
 #
 # Argo CD sync waves (argocd.argoproj.io/sync-wave) order one full sync of an
@@ -34,7 +38,6 @@
 # ranker-db-check (dbcheck-job.yaml) logs in with each generated database
 # role secret and fails the sync if a secret is missing or a login is refused.
 # tests/deploy/sync-waves.test.ts holds every reference to this order.
-# The Application itself (argocd/application.yaml) is wave 0.
 # The API (wave 8) starts only after every ExternalSecret it reads reports
 # Ready (Argo CD's ExternalSecret health check gates each wave), so it never
 # boots without its secrets; tests/deploy/sync-order.test.ts holds that.
@@ -54,7 +57,6 @@ resources:
   - api-keys-job.yaml
   - api.yaml
   - dbcheck-job.yaml
-  - argocd/application.yaml
 # CNPG bootstrap SQL and the migration script, kept as plain files so the
 # schema tests run exactly what deploys. Fixed names: the Cluster refers to
 # its ConfigMap from a CRD field kustomize cannot rewrite.

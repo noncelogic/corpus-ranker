@@ -1,8 +1,9 @@
-// CR-D1-PROMOTE acceptance: the rendered overlay declares the Argo CD
-// Application that tracks deploy/ on aks-obs-01, and the ranker API runs as
-// an Argo Rollouts blue/green Rollout whose promotion waits on the readiness
-// probe -- GET /readyz, which answers only while both the database and the
-// object store do (src/api/readiness.ts, tests/api/readiness.test.ts).
+// CR-D1-PROMOTE acceptance, as amended by CR-ARGO-APP-OUT: the rendered
+// overlay declares no Argo CD Application (the estate one tracks deploy/ on
+// aks-obs-01), and the ranker API runs as an Argo Rollouts blue/green
+// Rollout whose promotion waits on the readiness probe -- GET /readyz, which
+// answers only while both the database and the object store do
+// (src/api/readiness.ts, tests/api/readiness.test.ts).
 //
 // Requires a kustomize binary ($KUSTOMIZE, `kustomize`, or `kubectl
 // kustomize`); rendering is purely local, nothing here talks to a cluster.
@@ -13,51 +14,32 @@ import { findObject, renderObjects, type K8sObject } from "./render.ts";
 
 const NAMESPACE = "corpus-ranker";
 const WAVE = "argocd.argoproj.io/sync-wave";
-const IN_CLUSTER = "https://kubernetes.default.svc";
 
 const wave = (o: K8sObject): number => Number(o.metadata.annotations?.[WAVE]);
 
-test("the overlay declares the Argo CD Application tracking deploy/ of noncelogic/corpus-ranker on aks-obs-01", () => {
-  const apps = renderObjects().filter((o) => o.kind === "Application");
-  assert.equal(apps.length, 1, "exactly one Argo CD Application is rendered");
-  const app = apps[0]!;
-  assert.equal(app.apiVersion, "argoproj.io/v1alpha1");
-  assert.equal(app.metadata.name, NAMESPACE);
-  // Argo CD reconciles Applications in its own namespace, on aks-obs-01 itself
-  // (deploy/acr/check-image-pull.ts reads it there with the cluster's kubeconfig).
-  assert.equal(app.metadata.namespace, "argocd", "the Application lives in Argo CD's namespace");
-  assert.equal(app.metadata.annotations?.["noncelogic.com/cluster"], "aks-obs-01");
-
-  const source = app.spec.source;
-  assert.equal(app.spec.sources, undefined, "one source: this repository's deploy/ overlay");
-  assert.match(source.repoURL, /^https:\/\/github\.com\/noncelogic\/corpus-ranker(\.git)?$/);
-  assert.equal(source.path, "deploy");
-  assert.equal(source.targetRevision, "main");
-
-  // The destination is the cluster Argo CD runs in: aks-obs-01.
-  assert.equal(app.spec.destination.server, IN_CLUSTER);
-  assert.equal(app.spec.destination.namespace, NAMESPACE);
-
-  const automated = app.spec.syncPolicy?.automated;
-  assert.ok(automated, "the Application syncs automatically from Git");
-  assert.equal(automated.prune, true);
-  assert.equal(automated.selfHeal, true);
-
-  // The Application is in its own render: its own sync must never prune or delete it,
-  // and the estate's image pin on it (spec.source.kustomize, CRANK-212) survives self-heal.
-  const syncOptions = String(app.metadata.annotations?.["argocd.argoproj.io/sync-options"] ?? "").split(",");
-  assert.ok(syncOptions.includes("Prune=false") && syncOptions.includes("Delete=false"), `sync-options ${syncOptions.join(",")}`);
-  assert.ok((app.spec.syncPolicy.syncOptions ?? []).includes("RespectIgnoreDifferences=true"));
-  const ignored = (app.spec.ignoreDifferences ?? []) as Array<Record<string, any>>;
-  assert.ok(
-    ignored.some((d) => d.group === "argoproj.io" && d.kind === "Application" && d.name === NAMESPACE && (d.jsonPointers ?? []).includes("/spec/source/kustomize")),
-    "the Application ignores drift on its own estate-pinned spec.source.kustomize",
+// CR-ARGO-APP-OUT: the overlay renders no Argo CD Application. The one
+// definition of argocd/corpus-ranker is the estate Application (meta-harness
+// devops/aks/corpus-ranker-argo/application.yaml: AppProject corpus-ranker,
+// prune off, the image pin and the OpenBao Job patches), which syncs this
+// overlay at targetRevision main. AppProject corpus-ranker permits only
+// namespace corpus-ranker, so every rendered namespaced object targets it; an
+// Application rendered here would land in namespace argocd and, if admitted,
+// replace the estate spec. deploy/acr/check-image-pull.ts reads the estate
+// Application from the cluster.
+test("kustomize build deploy/ renders no Argo CD Application and every rendered namespaced object targets namespace corpus-ranker", () => {
+  const objects = renderObjects();
+  const apps = objects.filter((o) => o.apiVersion.startsWith("argoproj.io/") && (o.kind === "Application" || o.kind === "ApplicationSet" || o.kind === "AppProject"));
+  assert.deepEqual(
+    apps.map((o) => `${o.kind}/${o.metadata.namespace}/${o.metadata.name}`),
+    [],
+    "the estate Application is the one definition of argocd/corpus-ranker",
   );
-  assert.equal((app.metadata as Record<string, unknown>).finalizers, undefined, "no cascading-delete finalizer on a self-managed Application");
 
-  // Everything else lands in the ranker's namespace.
-  for (const o of renderObjects()) {
-    if (o.kind === "Namespace" || o === app) continue;
+  for (const o of objects) {
+    if (o.kind === "Namespace") {
+      assert.equal(o.metadata.name, NAMESPACE, `Namespace/${o.metadata.name} is not the ranker's namespace`);
+      continue;
+    }
     assert.equal(o.metadata.namespace, NAMESPACE, `${o.kind}/${o.metadata.name} is not in namespace ${NAMESPACE}`);
   }
 });

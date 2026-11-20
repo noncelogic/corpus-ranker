@@ -20,8 +20,14 @@
 //   - every API and migration pod ran that pinned image: the ranker container
 //     (api; the migrations init container) and any other container naming a
 //     corpus-ranker image, by the image in the pod spec and the image the
-//     kubelet reports in the container status. A workload with no pod left to
-//     read is a mismatch too: nothing shows what it ran.
+//     kubelet reports in the container status. The kubelet fills status.image
+//     even for a container still waiting (ImagePullBackOff, ErrImagePull), so
+//     a container counts as having run only with execution evidence -- a
+//     running or terminated state, or a terminated lastState, carrying a
+//     containerID -- and an image identity: a non-empty status imageID that
+//     is a sha256 digest of the registry image. A container that never ran is
+//     named with its waiting reason. A workload with no pod left to read is a
+//     mismatch too: nothing shows what it ran.
 //
 // Run estate-side with a kubeconfig that may get Applications in argocd and
 // pods in corpus-ranker. It reads object specs and statuses only, never a
@@ -137,6 +143,41 @@ interface ContainerRun {
   specImage?: string;
   statusImage?: string;
   imageID?: string;
+  /** The container status, when the kubelet reported one. */
+  status?: Record<string, any>;
+}
+
+/**
+ * Where the container status shows the container was started, or undefined.
+ * Kubernetes ContainerStatus: state.running (with the status's containerID),
+ * state.terminated or lastState.terminated (each with its own containerID).
+ */
+function executionEvidence(status: Record<string, any>): string | undefined {
+  const has = (v: unknown) => typeof v === "string" && v !== "";
+  const state = isRecord(status.state) ? status.state : {};
+  const last = isRecord(status.lastState) ? status.lastState : {};
+  const exit = (t: Record<string, any>) => `exit ${quote(t.exitCode ?? null)}${t.reason ? ` ${t.reason}` : ""}`;
+  if (isRecord(state.running) && has(status.containerID)) return `running since ${state.running.startedAt ?? "?"}`;
+  if (isRecord(state.terminated) && (has(state.terminated.containerID) || has(status.containerID))) return `terminated, ${exit(state.terminated)}`;
+  if (isRecord(last.terminated) && has(last.terminated.containerID)) return `last terminated, ${exit(last.terminated)}`;
+  return undefined;
+}
+
+/** Why a container status shows no run: its waiting reason, when there is one. */
+function notRunReason(status: Record<string, any>): string {
+  const w = isRecord(status.state) && isRecord(status.state.waiting) ? status.state.waiting : undefined;
+  if (w) return `waiting${w.reason ? ` (${w.reason}${w.message ? `: ${String(w.message).split("\n")[0]}` : ""})` : ""}`;
+  return "no running or terminated state with a containerID";
+}
+
+/** The problem with a status imageID as identity of the registry image, if any. */
+function imageIdProblem(imageID: string | undefined): string | undefined {
+  if (imageID === undefined || imageID === "") return "reports no imageID";
+  const id = imageID.replace(/^[a-z-]+:\/\//, ""); // docker-pullable://, containerd's bare form
+  const m = /^(?:(.+)@)?(sha256:[0-9a-f]{64})$/.exec(id);
+  if (!m) return `imageID ${quote(imageID)} is not a sha256 digest`;
+  if (m[1] !== undefined && m[1] !== REGISTRY_IMAGE) return `imageID ${quote(imageID)} is not a digest of ${REGISTRY_IMAGE}`;
+  return undefined;
 }
 
 function containersOf(pod: Record<string, any>): ContainerRun[] {
@@ -148,7 +189,7 @@ function containersOf(pod: Record<string, any>): ContainerRun[] {
     const statuses: Array<Record<string, any>> = Array.isArray(pod.status?.[statusKey]) ? pod.status[statusKey] : [];
     for (const c of Array.isArray(pod.spec?.[specKey]) ? (pod.spec[specKey] as Array<Record<string, any>>) : []) {
       const s = statuses.find((x) => x.name === c.name);
-      out.push({ name: String(c.name), init, specImage: c.image, statusImage: s?.image, imageID: s?.imageID });
+      out.push({ name: String(c.name), init, specImage: c.image, statusImage: s?.image, imageID: s?.imageID, status: s });
     }
   }
   return out;
@@ -177,13 +218,23 @@ function checkPods(workload: (typeof WORKLOADS)[number], list: unknown, pinned: 
         mismatches.push(`${at} has not run (no container status); spec image ${quote(c.specImage ?? null)}, expected ${want}`);
         continue;
       }
+      const evidence = executionEvidence(c.status!);
+      if (evidence === undefined) {
+        mismatches.push(`${at} never ran: ${notRunReason(c.status!)}; status image ${quote(c.statusImage)}, imageID ${quote(c.imageID ?? null)}, expected ${want}`);
+        continue;
+      }
       const bad = [c.specImage, c.statusImage].filter((i) => pinned === undefined || i !== pinned);
       if (bad.length > 0) {
         const detail = c.specImage !== c.statusImage ? ` (spec ${quote(c.specImage ?? null)}, status ${quote(c.statusImage)})` : "";
         mismatches.push(`${at} ran ${ran}${detail}, not ${want}`);
-      } else {
-        ok.push(`${workload.id}: pod ${podName} container ${c.name} ran ${ran}${c.imageID ? ` (${c.imageID})` : ""}`);
+        continue;
       }
+      const idProblem = imageIdProblem(c.imageID);
+      if (idProblem !== undefined) {
+        mismatches.push(`${at} ran ${ran} (${evidence}) but ${idProblem}; nothing identifies the image it ran`);
+        continue;
+      }
+      ok.push(`${workload.id}: pod ${podName} container ${c.name} ran ${ran} (${c.imageID}; ${evidence})`);
     }
   }
 }

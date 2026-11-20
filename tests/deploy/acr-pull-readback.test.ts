@@ -57,9 +57,51 @@ function application(kustomize: { images?: unknown; patches?: unknown[] }) {
   });
 }
 
+const STARTED = "2026-11-19T22:04:31Z";
+const FINISHED = "2026-11-19T22:04:48Z";
+const imageIdOf = (image: string) => `${image.split(/[:@]/)[0]}@${DIGEST}`;
+const containerdId = (n: string) => `containerd://${n.padEnd(64, "0").replace(/[^0-9a-f]/g, "a").slice(0, 64)}`;
+
+/** The kubelet's status for a container that is running now. */
+const runningStatus = (n: string, image: string) => ({
+  name: n,
+  image,
+  imageID: imageIdOf(image),
+  containerID: containerdId(n),
+  ready: true,
+  started: true,
+  restartCount: 0,
+  state: { running: { startedAt: STARTED } },
+  lastState: {},
+});
+/** The kubelet's status for an init container that ran to completion. */
+const completedInitStatus = (n: string, image: string) => ({
+  name: n,
+  image,
+  imageID: imageIdOf(image),
+  containerID: containerdId(n),
+  ready: true,
+  started: false,
+  restartCount: 0,
+  state: { terminated: { exitCode: 0, reason: "Completed", startedAt: STARTED, finishedAt: FINISHED, containerID: containerdId(n) } },
+  lastState: {},
+});
+/**
+ * The kubelet's status for a container whose image never pulled: status.image
+ * is filled from the spec, imageID is empty, and there is no execution history.
+ */
+const pullFailedStatus = (n: string, image: string, reason = "ImagePullBackOff") => ({
+  name: n,
+  image,
+  imageID: "",
+  ready: false,
+  started: false,
+  restartCount: 0,
+  state: { waiting: { reason, message: `Back-off pulling image "${image}"` } },
+  lastState: {},
+});
+
 function pod(name: string, spec: { initContainers?: Array<[string, string]>; containers: Array<[string, string]> }) {
-  const status = (cs: Array<[string, string]>) =>
-    cs.map(([n, image]) => ({ name: n, image, imageID: `${image.split(/[:@]/)[0]}@${DIGEST}` }));
   return {
     apiVersion: "v1",
     kind: "Pod",
@@ -68,7 +110,10 @@ function pod(name: string, spec: { initContainers?: Array<[string, string]>; con
       initContainers: (spec.initContainers ?? []).map(([n, image]) => ({ name: n, image })),
       containers: spec.containers.map(([n, image]) => ({ name: n, image })),
     },
-    status: { initContainerStatuses: status(spec.initContainers ?? []), containerStatuses: status(spec.containers) },
+    status: {
+      initContainerStatuses: (spec.initContainers ?? []).map(([n, image]) => completedInitStatus(n, image)),
+      containerStatuses: spec.containers.map(([n, image]) => runningStatus(n, image)),
+    },
   };
 }
 
@@ -142,6 +187,30 @@ test("readback passes when the Application pins the ACR sha tag without an Exter
     }).dir,
   );
   assert.equal(same.code, 0, same.output);
+
+  // An API container that crashed once and is restarting still ran the pin: its lastState shows the run.
+  const restarted = runChecker(
+    fakeKubectl(t, {
+      ...goodReads(),
+      api: podList({
+        ...apiPod("ranker-api-7c9d5b8f6d-x2k4q", PINNED),
+        status: {
+          containerStatuses: [
+            {
+              ...runningStatus("api", PINNED),
+              ready: false,
+              started: false,
+              restartCount: 1,
+              state: { waiting: { reason: "CrashLoopBackOff" } },
+              lastState: { terminated: { exitCode: 1, reason: "Error", startedAt: STARTED, finishedAt: FINISHED, containerID: containerdId("api") } },
+            },
+          ],
+        },
+      }),
+    }).dir,
+  );
+  assert.equal(restarted.code, 0, restarted.output);
+  assert.match(restarted.stdout, /container api ran .*last terminated, exit 1/);
 });
 
 test("readback fails naming the bridge entry when the Application still carries the ghcr.io image override or the ranker-ghcr-pull ExternalSecret patch", (t) => {
@@ -221,9 +290,48 @@ test("readback fails naming the workload when an API or migration pod ran an ima
       name: "a pod whose spec names the pin but whose status reports another image",
       api: podList({
         ...apiPod("ranker-api-7c9d5b8f6d-x2k4q", PINNED),
-        status: { containerStatuses: [{ name: "api", image: GHCR, imageID: `ghcr.io/noncelogic/corpus-ranker@${DIGEST}` }] },
+        status: { containerStatuses: [runningStatus("api", GHCR)] },
       }),
       expect: [/Deployment\/ranker-api: pod ranker-api-7c9d5b8f6d-x2k4q container api ran ghcr\.io/],
+    },
+    {
+      name: "API and migration containers stuck in image pull with the pin in status.image but no run",
+      api: podList({
+        ...apiPod("ranker-api-7c9d5b8f6d-x2k4q", PINNED),
+        status: { phase: "Pending", containerStatuses: [pullFailedStatus("api", PINNED)] },
+      }),
+      migrate: podList({
+        ...migratePod("ranker-db-migrate-8qz7m", PINNED),
+        status: {
+          phase: "Pending",
+          initContainerStatuses: [pullFailedStatus("migrations", PINNED, "ErrImagePull")],
+          containerStatuses: [{ name: "migrate", image: PG, imageID: "", ready: false, started: false, restartCount: 0, state: { waiting: { reason: "PodInitializing" } }, lastState: {} }],
+        },
+      }),
+      expect: [
+        /Deployment\/ranker-api: pod ranker-api-7c9d5b8f6d-x2k4q container api never ran: waiting \(ImagePullBackOff/,
+        /Job\/ranker-db-migrate: pod ranker-db-migrate-8qz7m container migrations never ran: waiting \(ErrImagePull/,
+      ],
+      not: [/ ran noncelogicci/],
+    },
+    {
+      name: "a running container whose status names the pin but reports no imageID",
+      api: podList({
+        ...apiPod("ranker-api-7c9d5b8f6d-x2k4q", PINNED),
+        status: { containerStatuses: [{ ...runningStatus("api", PINNED), imageID: "" }] },
+      }),
+      expect: [/Deployment\/ranker-api: pod ranker-api-7c9d5b8f6d-x2k4q container api ran .* but reports no imageID/],
+    },
+    {
+      name: "a completed migration whose imageID is a digest of the ghcr.io image",
+      migrate: podList({
+        ...migratePod("ranker-db-migrate-8qz7m", PINNED),
+        status: {
+          initContainerStatuses: [{ ...completedInitStatus("migrations", PINNED), imageID: `ghcr.io/noncelogic/corpus-ranker@${DIGEST}` }],
+          containerStatuses: [runningStatus("migrate", PG)],
+        },
+      }),
+      expect: [/Job\/ranker-db-migrate: pod ranker-db-migrate-8qz7m container migrations ran .* is not a digest of noncelogicci\.azurecr\.io\/corpus-ranker/],
     },
     {
       name: "no migration pod left to read",

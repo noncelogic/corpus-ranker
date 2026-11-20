@@ -1,22 +1,25 @@
 // CR-D1-PROMOTE acceptance: the readiness endpoint (GET /readyz, the probe the
 // blue/green Rollout's promotion waits on, deploy/api.yaml) reports not ready
 // until both the database and the object store answer. Each dependency check
-// is bounded: an unavailable dependency (connection refused), a failed one
+// is bounded: an unavailable dependency (its connection reset on arrival), a failed one
 // (refused credentials) and a timed-out one (accepts the connection, never
 // answers) each answer 503 within the bound. Liveness (GET /healthz) stays
 // independent of both, so a dependency outage never restarts the pod.
 //
 // Runs against the real path: the compose replica's Postgres and MinIO, the
-// service's own login, and the default wiring from loadConfig.
+// service's own login, and the default wiring from loadConfig. The time bound
+// itself is proved with controlled timers in the "bound:" tests at the end of
+// this file, not with a wall clock; these tests assert on the completed response.
 import { after, before, test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { createServer as createTcpServer, type AddressInfo, type Server as TcpServer, type Socket } from "node:net";
 import type { Server } from "node:http";
 import { createServer, loadConfig } from "../../src/server.ts";
+import { readiness } from "../../src/api/readiness.ts";
 import { freshDatabase, type FreshDb } from "../schema/fresh-db.ts";
 
 const SERVICE = { user: "ranker_rdy", password: "rdy-local-only" };
-/** The readiness bound these tests run with; a timed-out check must answer well inside the test's patience. */
+/** The readiness bound these tests run with; requests below allow it generous patience, not a timing assertion. */
 const TIMEOUT_MS = 1_500;
 
 let db: FreshDb;
@@ -48,13 +51,16 @@ async function silentListener(): Promise<string> {
   return `127.0.0.1:${(server.address() as AddressInfo).port}`;
 }
 
-/** A local port nothing listens on: a dependency that is down. */
-async function closedPort(): Promise<string> {
-  const server = createTcpServer();
+/**
+ * A dependency that is down: a listener held open for the whole run (so no
+ * other server, test or otherwise, can take its port) that resets every
+ * connection the moment it arrives, before a byte is exchanged.
+ */
+async function refusingListener(): Promise<string> {
+  const server: TcpServer = createTcpServer((s) => s.resetAndDestroy());
   await new Promise<void>((ok) => server.listen(0, "127.0.0.1", ok));
-  const { port } = server.address() as AddressInfo;
-  await new Promise((ok) => server.close(ok));
-  return `127.0.0.1:${port}`;
+  cleanups.push(() => new Promise((ok) => server.close(ok)));
+  return `127.0.0.1:${(server.address() as AddressInfo).port}`;
 }
 
 const pgHost = (): string => new URL(db.databaseUrl(SERVICE)).host;
@@ -81,14 +87,12 @@ async function start(w: Wiring = {}): Promise<string> {
 interface Readiness {
   status: number;
   body: { status: string; checks: { database: string; object_store: string } };
-  ms: number;
 }
 
 async function readyz(base: string): Promise<Readiness> {
-  const t0 = performance.now();
   const res = await fetch(`${base}/readyz`, { signal: AbortSignal.timeout(TIMEOUT_MS * 4) });
   const body = (await res.json()) as Readiness["body"];
-  return { status: res.status, body, ms: performance.now() - t0 };
+  return { status: res.status, body };
 }
 
 async function assertLive(base: string): Promise<void> {
@@ -106,7 +110,7 @@ test("ready once both the database and the object store answer", async () => {
 
 test("not ready while the database is unavailable, failed or timed out, though the object store answers", async (t) => {
   const cases: Array<[string, () => Promise<string>, string]> = [
-    ["unavailable", async () => `postgres://${SERVICE.user}:${SERVICE.password}@${await closedPort()}/ranker`, "failed"],
+    ["unavailable", async () => `postgres://${SERVICE.user}:${SERVICE.password}@${await refusingListener()}/ranker`, "failed"],
     ["failed (login refused)", async () => `postgres://${SERVICE.user}:wrong-password@${pgHost()}/ranker`, "failed"],
     ["timed out", async () => `postgres://${SERVICE.user}:${SERVICE.password}@${await silentListener()}/ranker`, "timeout"],
   ];
@@ -116,7 +120,6 @@ test("not ready while the database is unavailable, failed or timed out, though t
       const r = await readyz(base);
       assert.equal(r.status, 503, JSON.stringify(r.body));
       assert.deepEqual(r.body, { status: "not_ready", checks: { database: expected, object_store: "ok" } });
-      assert.ok(r.ms < TIMEOUT_MS * 2, `readiness took ${Math.round(r.ms)}ms; the bound is ${TIMEOUT_MS}ms`);
       await assertLive(base);
     });
   }
@@ -124,7 +127,7 @@ test("not ready while the database is unavailable, failed or timed out, though t
 
 test("not ready while the object store is unavailable, refuses the credentials or times out, though the database answers", async (t) => {
   const cases: Array<[string, () => Promise<Wiring>, string]> = [
-    ["unavailable", async () => ({ s3Endpoint: `http://${await closedPort()}` }), "failed"],
+    ["unavailable", async () => ({ s3Endpoint: `http://${await refusingListener()}` }), "failed"],
     // The check is authenticated: a reachable store that rejects the ranker's credentials is not ready.
     ["failed (credentials refused)", async () => ({ s3SecretAccessKey: "not-the-writer-secret" }), "failed"],
     ["timed out", async () => ({ s3Endpoint: `http://${await silentListener()}` }), "timeout"],
@@ -135,7 +138,6 @@ test("not ready while the object store is unavailable, refuses the credentials o
       const r = await readyz(base);
       assert.equal(r.status, 503, JSON.stringify(r.body));
       assert.deepEqual(r.body, { status: "not_ready", checks: { database: "ok", object_store: expected } });
-      assert.ok(r.ms < TIMEOUT_MS * 2, `readiness took ${Math.round(r.ms)}ms; the bound is ${TIMEOUT_MS}ms`);
       await assertLive(base);
     });
   }
@@ -144,11 +146,111 @@ test("not ready while the object store is unavailable, refuses the credentials o
 test("not ready while neither answers", async () => {
   const base = await start({
     databaseUrl: `postgres://${SERVICE.user}:${SERVICE.password}@${await silentListener()}/ranker`,
-    s3Endpoint: `http://${await closedPort()}`,
+    s3Endpoint: `http://${await refusingListener()}`,
   });
   const r = await readyz(base);
   assert.equal(r.status, 503);
   assert.deepEqual(r.body, { status: "not_ready", checks: { database: "timeout", object_store: "failed" } });
-  assert.ok(r.ms < TIMEOUT_MS * 2, `readiness took ${Math.round(r.ms)}ms; the bound is ${TIMEOUT_MS}ms`);
   await assertLive(base);
+});
+
+// The bound, proved with controlled timers and deferred dependencies rather
+// than a wall clock: nothing settles before TIMEOUT_MS of (mocked) time has
+// passed, everything has settled once it has, and the two checks run side by
+// side so the whole probe answers within one bound, not two.
+
+interface Deferred<T> {
+  promise: Promise<T>;
+  resolve: (v: T) => void;
+}
+function deferred<T>(): Deferred<T> {
+  let resolve!: (v: T) => void;
+  const promise = new Promise<T>((ok) => (resolve = ok));
+  return { promise, resolve };
+}
+
+/** Call readiness over the given dependency stubs, tracking whether it has answered. */
+function probe(db: () => Promise<unknown>, ping: (signal?: AbortSignal) => Promise<unknown>) {
+  let settled = false;
+  const result = readiness({
+    db: { query: db as never },
+    store: { ping: ping as never },
+    timeoutMs: TIMEOUT_MS,
+    log: () => {},
+  }).finally(() => (settled = true));
+  return { result, settled: () => settled };
+}
+
+/** Let pending promise callbacks run (no timers involved). */
+const flush = () => new Promise<void>((ok) => setImmediate(ok));
+
+test("bound: a hanging database check answers timeout exactly at the bound, not before", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const hang = deferred<unknown[]>();
+  const p = probe(() => hang.promise, async () => {});
+  t.mock.timers.tick(TIMEOUT_MS - 1);
+  await flush();
+  assert.equal(p.settled(), false, "readiness answered before the bound");
+  t.mock.timers.tick(1);
+  await flush();
+  assert.equal(p.settled(), true, "readiness had not answered once the bound passed");
+  const r = await p.result;
+  assert.equal(r.status, 503);
+  assert.deepEqual(r.body, { status: "not_ready", checks: { database: "timeout", object_store: "ok" } });
+});
+
+test("bound: a hanging object-store check answers timeout at the bound and is aborted", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let seen: AbortSignal | undefined;
+  const hang = deferred<void>();
+  const p = probe(
+    async () => [],
+    (signal) => {
+      seen = signal;
+      return hang.promise;
+    },
+  );
+  t.mock.timers.tick(TIMEOUT_MS - 1);
+  await flush();
+  assert.equal(p.settled(), false, "readiness answered before the bound");
+  assert.equal(seen?.aborted, false);
+  t.mock.timers.tick(1);
+  await flush();
+  assert.equal(p.settled(), true, "readiness had not answered once the bound passed");
+  const r = await p.result;
+  assert.equal(r.status, 503);
+  assert.deepEqual(r.body, { status: "not_ready", checks: { database: "ok", object_store: "timeout" } });
+  assert.equal(seen?.aborted, true, "the timed-out request must be aborted, not left running");
+});
+
+test("bound: both checks hanging answer within one bound, since they run concurrently", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const p = probe(() => deferred<unknown[]>().promise, () => deferred<void>().promise);
+  t.mock.timers.tick(TIMEOUT_MS);
+  await flush();
+  assert.equal(p.settled(), true, "the checks must share one bound, not run one after the other");
+  const r = await p.result;
+  assert.deepEqual(r.body, { status: "not_ready", checks: { database: "timeout", object_store: "timeout" } });
+});
+
+test("bound: a dependency that answers just inside the bound is ok", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const slowDb = deferred<unknown[]>();
+  const slowStore = deferred<void>();
+  const p = probe(() => slowDb.promise, () => slowStore.promise);
+  t.mock.timers.tick(TIMEOUT_MS - 1);
+  slowDb.resolve([]);
+  slowStore.resolve();
+  const r = await p.result;
+  assert.equal(r.status, 200);
+  assert.deepEqual(r.body, { status: "ready", checks: { database: "ok", object_store: "ok" } });
+});
+
+test("bound: a dependency that fails answers failed at once, without waiting for the bound", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const p = probe(async () => {
+    throw new Error("ECONNREFUSED");
+  }, async () => {});
+  const r = await p.result; // no tick: the mocked clock never reaches the bound
+  assert.deepEqual(r.body, { status: "not_ready", checks: { database: "failed", object_store: "ok" } });
 });

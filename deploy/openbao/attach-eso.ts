@@ -7,7 +7,10 @@
 //
 // devops/openbao/kubernetes-roles/eso-obs.attach.json names the auth mount,
 // the role (eso-obs on mount kubernetes) and the policies to add, each with
-// its file in devops/openbao/policies/. In order, this script:
+// its file in devops/openbao/policies/. Each file must itself grant read on
+// exactly one kv/corpus-ranker/<purpose> path, a different one per policy, and
+// nothing else (no wildcard, list, write or metadata); a file that does not is
+// refused with exit 2 before OpenBao is read or written. In order, this script:
 //
 //   1. snapshots the live role (`bao read -format=json auth/<mount>/role/<role>`).
 //      An absent role is never created: exit 2, nothing written;
@@ -35,7 +38,8 @@
 // write policies and the role. Exit 0: applied and read back as declared.
 // Exit 1: the readback differs (each difference on stderr, one per line).
 // Exit 2: a read or write failed (unreachable, permission denied), the role
-// is absent, the manifest is unreadable, or a usage error.
+// is absent, the manifest or a policy file it names is unreadable or breaks
+// the one-exact-path read-only rule, or a usage error.
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { isDeepStrictEqual } from "node:util";

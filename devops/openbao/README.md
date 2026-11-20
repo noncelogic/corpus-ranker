@@ -45,6 +45,12 @@ declares their attachment to `eso-obs`, in that order, add-only: the role's
 existing policies, among them the estate-held grant on the ranker's ACR pull
 credential `kv/corpus-ranker/acr-pull` (meta-harness
 devops/aks/corpus-ranker-argo/README.md), stay attached.
+That estate-held grant, `external-secrets-corpus-ranker-acr-pull`, was created
+and attached estate-side on 2026-11-19; its reviewed source is
+[`policies/external-secrets-corpus-ranker-acr-pull.hcl`](policies/external-secrets-corpus-ranker-acr-pull.hcl)
+(read on `kv/corpus-ranker/acr-pull` alone, read by the ExternalSecret
+`ranker-registry-pull` only; `tests/deploy/registry-pull-grant.test.ts`). It
+is not in the attach manifest: the role already holds it.
 The estate apply is CRANK-188, one command, logged in to OpenBao with rights
 to read and write policies and the role:
 

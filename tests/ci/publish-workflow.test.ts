@@ -208,10 +208,12 @@ test("publish logs in through OpenBao JWT role corpus-ranker-registry-push and n
 
 test("ci.yml no longer publishes, so each merge to main pushes the image exactly once", async (t) => {
   // A merge to main: every workflow it triggers runs, and exactly one image
-  // push happens in total — publish.yml's SHA tag.
+  // push happens in total — publish.yml's SHA tag. ci.yml's image job only
+  // builds (the pull-request dry run) and its ci-result gate (if: always())
+  // reads every need's result.
   const merge = await simulate(t, PUSH_MAIN, { creds: GOOD });
   const ran = merge.jobs.filter((j) => j.status !== "skipped").map((j) => `${j.workflow}/${j.job}`);
-  assert.deepEqual(ran.sort(), ["ci.yml/test", "publish.yml/image"], merge.output);
+  assert.deepEqual(ran.sort(), ["ci.yml/ci-result", "ci.yml/image", "ci.yml/test", "publish.yml/image"], merge.output);
   assert.ok(merge.jobs.every((j) => j.status !== "failure"), merge.output);
   assert.deepEqual(merge.calls.filter((c) => c.startsWith("docker push ")), [`docker push ${IMAGE}:sha-${SHA}`], "one push per merge");
   assert.equal(merge.calls.filter((c) => c.startsWith("docker login ")).length, 1, "one registry login per merge");

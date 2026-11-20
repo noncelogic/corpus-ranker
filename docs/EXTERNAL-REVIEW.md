@@ -147,6 +147,7 @@ second look, a changed mind, or an anomaly report can still stop the merge.
 | Rule | Enforced by |
 | --- | --- |
 | PR required, force-push/deletion blocked, conversations resolved | Branch protection on `main` (applies to admins too) |
+| A main-only job has a required PR dry run (policy main-stays-green): publish.yml `image` pushes to the estate registry on main only | Branch protection on `main`: strict (branch up to date with `main`), required status check `image` from ci.yml (`env: DRY_RUN_OF: image`; builds with publish.yml's Build step and checks its metadata, no login or push); publish.yml waits boundedly on its registries (`.github/scripts/retry.sh`) |
 | Sensitive-path review | CODEOWNERS + required code-owner review |
 | External CI gated, read-only token, no secrets to forks | Actions settings: approval for all external contributors; default workflow permissions = read |
 | Owner-only policy changes | CODEOWNERS on `.github/`, this file, CONTRIBUTING.md, SECURITY.md |

@@ -5,9 +5,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { pgClient } from "../../src/db/client.ts";
-import { DAILY_FILE, importHistoricalExport, readHistoricalExport } from "../../src/import/juno-historical-import.ts";
+import { DAILY_FILE, importHistoricalExport, publishedPaperRubricV1, readHistoricalExport } from "../../src/import/juno-historical-import.ts";
 import { WEEKLY_FILES } from "../../src/import/corpus-import-job.ts";
 import { freshDatabase } from "../schema/fresh-db.ts";
+import { score as scoreHandler } from "../../src/api/score.ts";
 
 function exportDirectory() {
   const dir = mkdtempSync(join(tmpdir(), "juno-historical-test-"));
@@ -109,4 +110,33 @@ test("daily publication transitions retain their own item alongside the preprint
   assert.notEqual(preprint.id, publication.id);
   assert.equal(publication.canonical_fields.supersedes, "2610.01234v1");
   assert.equal(new Set(events.map((e) => e.item_id)).size, 2);
+});
+
+test("a score by juno:weekly-aggregation-triage under the published paper-rubric v1 is recorded, not refused as scorer_not_allowed", async (t) => {
+  const dir = exportDirectory();
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const fixture = await freshDatabase(t);
+  const db = pgClient(fixture.databaseUrl());
+  t.after(() => db.end());
+  const store = { async put() {}, async get() { return null; }, uri(key: string) { return `test:${key}`; } };
+  // The history import publishes paper-rubric v1 into the store.
+  await importHistoricalExport(dir, db, store);
+  const itemId = fixture.psql("select id from items where corpus_id='cr_corpus_papers' limit 1");
+  const originalId = fixture.psql(`select original_id from item_originals where item_id='${itemId}'`);
+  const out = await scoreHandler(JSON.stringify({
+    item_id: itemId,
+    policy_id: publishedPaperRubricV1.id,
+    policy_version: publishedPaperRubricV1.version,
+    dimension_scores: ["Relevance", "Technical Merit"].map((dimension, i) => ({
+      dimension, value: 4 - i, reason: "Juno weekly triage score", evidence: [{ id: originalId }],
+    })),
+    scorer: { identity: "juno:weekly-aggregation-triage", config: { rubric: "paper-rubric v1", scored_at_from: "first_seen" } },
+    source_blind: false,
+    scored_at: "2026-11-04T00:00:00Z",
+  }), { db, now: () => new Date("2026-11-20T12:00:00Z") });
+  assert.equal(out.status, 201, JSON.stringify(out.body));
+  assert.equal(
+    fixture.psql("select count(*) from score_events where scorer->>'identity' = 'juno:weekly-aggregation-triage' and policy_id='cr_pol_paper' and policy_version=1"),
+    "1",
+  );
 });

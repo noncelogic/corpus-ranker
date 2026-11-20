@@ -63,16 +63,24 @@ function roleRead(tokenPolicies: string[], overrides: Record<string, unknown> = 
   }, null, 2);
 }
 
-/** A fake `bao` on PATH: serves the given policies and role read, or the CLI's not-found errors when absent. */
-function fakeBao(t: TestContext, reads: { policies: Record<string, string>; role?: string }) {
+/**
+ * A fake `bao` on PATH: serves the given policies and role read, or the CLI's not-found errors when absent.
+ * `deny` lists exact invocations (arguments joined by spaces) answered with OpenBao's 403 permission denial;
+ * any invocation not matched exactly fails with a distinct "unexpected call" error (exit 64).
+ */
+function fakeBao(t: TestContext, reads: { policies: Record<string, string>; role?: string; deny?: string[] }) {
   const dir = mkdtempSync(join(tmpdir(), "fake-bao-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   for (const [name, text] of Object.entries(reads.policies)) writeFileSync(join(dir, `policy-${name}.hcl`), text);
   if (reads.role !== undefined) writeFileSync(join(dir, "role.json"), reads.role);
   writeFileSync(join(dir, "calls"), "");
+  writeFileSync(join(dir, "deny"), (reads.deny ?? []).map((d) => `${d}\n`).join(""));
   const bao = join(dir, "bao");
   writeFileSync(bao, `#!/bin/sh
 echo "$*" >> "${dir}/calls"
+if [ -s "${dir}/deny" ] && printf '%s\\n' "$*" | grep -qxF -f "${dir}/deny"; then
+  echo "Error reading $*: Code: 403. Errors: * permission denied" >&2; exit 2
+fi
 if [ "$1 $2" = "policy read" ] && [ "$#" -eq 3 ]; then
   [ -f "${dir}/policy-$3.hcl" ] && { cat "${dir}/policy-$3.hcl"; exit 0; }
   echo "No policy named: $3" >&2; exit 2
@@ -231,14 +239,33 @@ test("eso-obs attach readback: fails naming the drift for each case: a manifest 
     assert.match(many.stderr, d);
   }
 
-  // A read that fails for another reason (permission denied, unreachable) is exit 2, not drift.
-  const dir = mkdtempSync(join(tmpdir(), "fake-bao-"));
-  t.after(() => rmSync(dir, { recursive: true, force: true }));
-  writeFileSync(join(dir, "bao"), `#!/bin/sh\necho "Error reading ${ROLE_PATH}: Code: 403. Errors: * permission denied" >&2\nexit 2\n`);
-  chmodSync(join(dir, "bao"), 0o755);
-  const denied = runChecker(dir);
-  assert.equal(denied.code, 2, denied.output);
-  assert.match(denied.stderr, /permission denied/);
+  // A read that fails for another reason (permission denied) is exit 2, not drift. Only the exact expected
+  // invocation is denied; any other command or path would hit the fake's distinct "unexpected call" error.
+  const roleDeniedBao = fakeBao(t, { policies: declaredPolicies(), role: roleRead([OTHER, ...ATTACHED]), deny: [`read -format=json ${ROLE_PATH}`] });
+  const roleDenied = runChecker(roleDeniedBao.dir);
+  assert.equal(roleDenied.code, 2, roleDenied.output);
+  assert.match(roleDenied.stderr, new RegExp(`Error reading read -format=json ${ROLE_PATH}: Code: 403\\. Errors: \\* permission denied`));
+  assert.doesNotMatch(roleDenied.output, /unexpected call/);
+  assert.deepEqual(roleDeniedBao.calls().trim().split("\n"), [`read -format=json ${ROLE_PATH}`]);
+
+  // The role reads, a manifest policy's read is denied: exit 2 naming that read, after the exact calls only.
+  const policyDeniedBao = fakeBao(t, { policies: declaredPolicies(), role: roleRead([OTHER, ...ATTACHED]), deny: [`policy read ${KEYS}`] });
+  const policyDenied = runChecker(policyDeniedBao.dir);
+  assert.equal(policyDenied.code, 2, policyDenied.output);
+  assert.match(policyDenied.stderr, new RegExp(`Error reading policy read ${KEYS}: Code: 403\\. Errors: \\* permission denied`));
+  assert.doesNotMatch(policyDenied.output, /unexpected call/);
+  const policyDeniedCalls = policyDeniedBao.calls().trim().split("\n");
+  assert.ok(policyDeniedCalls.includes(`policy read ${KEYS}`), policyDeniedCalls.join("\n"));
+  for (const call of policyDeniedCalls) {
+    assert.ok([`read -format=json ${ROLE_PATH}`, `policy read ${MINIO}`, `policy read ${KEYS}`].includes(call), `unexpected call recorded: ${call}`);
+  }
+
+  // The fake's denial is exact: a different role path is not denied but rejected as an unexpected call.
+  const strict = fakeBao(t, { policies: {}, deny: [`read -format=json ${ROLE_PATH}`] });
+  const wrong = spawnSync(join(strict.dir, "bao"), ["read", "-format=json", "auth/kubernetes/role/eso-other"], { encoding: "utf8" });
+  assert.equal(wrong.status, 64, wrong.stderr);
+  assert.match(wrong.stderr, /fake bao: unexpected call: read -format=json auth\/kubernetes\/role\/eso-other/);
+  assert.doesNotMatch(wrong.stderr, /permission denied/);
 });
 
 test("eso-obs attach readback: run against a real OpenBao holding eso-obs with an unrelated policy plus the attached ones, it passes, and names drift once an attached policy is widened", { timeout: 300_000 }, async (t) => {

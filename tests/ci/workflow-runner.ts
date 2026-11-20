@@ -3,7 +3,10 @@
 // hosted service does for the parts these workflows use:
 //
 //   - trigger matching (`on: push` with `branches`, `on: pull_request`);
-//   - job ordering by `needs`, job and step `if:` expressions;
+//   - job ordering by `needs`, job and step `if:` expressions, including the
+//     status functions success(), failure(), always() and cancelled() (an
+//     `if:` without one is implicitly `success() && ...`), and the needs
+//     context as `needs.<id>.result` and `join(needs.*.result, '<sep>')`;
 //   - workflow/job/step `env:` and `${{ vars.* | secrets.* | github.* }}`
 //     substitution in env values and `run:` scripts;
 //   - GITHUB_* defaults, RUNNER_TEMP, and the OIDC request variables
@@ -96,7 +99,15 @@ interface Context {
   repository: string;
   vars: Record<string, string>;
   secrets: Record<string, string>;
+  /** Results of the current job's direct needs, by job id, in `needs:` order. */
+  needs?: Record<string, string>;
+  /** What success() and failure() return where the expression is evaluated. */
+  status?: { success: boolean; failure: boolean };
 }
+
+/** The function calls the expression subset accepts; any other parenthesis is refused. */
+const CALL = /\b(?:always|success|failure|cancelled)\(\)|\bjoin\(\s*needs\.\*\.result\s*,\s*'(?:[^']|'')*'\s*\)/g;
+const STATUS_CALL = /\b(?:always|success|failure|cancelled)\(\)/;
 
 function operand(raw: string, ctx: Context): string | boolean {
   const s = raw.trim();
@@ -112,13 +123,28 @@ function operand(raw: string, ctx: Context): string | boolean {
     "github.repository": ctx.repository,
   };
   if (s in github) return github[s]!;
+  if (s === "always()") return true;
+  if (s === "cancelled()") return false;
+  if (s === "success()" || s === "failure()") {
+    if (!ctx.status) throw new Error(`${s} is not available here`);
+    return s === "success()" ? ctx.status.success : ctx.status.failure;
+  }
+  if ((m = /^needs\.([A-Za-z_][\w-]*)\.result$/.exec(s))) {
+    if (!ctx.needs || !(m[1]! in ctx.needs)) throw new Error(`unknown need in expression: ${s}`);
+    return ctx.needs[m[1]!]!;
+  }
+  if ((m = /^join\(\s*needs\.\*\.result\s*,\s*'((?:[^']|'')*)'\s*\)$/.exec(s))) {
+    if (!ctx.needs) throw new Error(`${s} is not available here`);
+    return Object.values(ctx.needs).join(m[1]!.replace(/''/g, "'"));
+  }
   throw new Error(`unsupported expression operand: ${s}`);
 }
 
-/** Evaluate the expression subset these workflows use: ||, &&, !, ==, !=, literals and contexts. */
+/** Evaluate the expression subset these workflows use: ||, &&, !, ==, !=, literals, contexts and the calls in CALL. */
 export function evaluate(expr: string, ctx: Context): string | boolean {
   const e = expr.trim().replace(/^\$\{\{([\s\S]*)\}\}$/, "$1").trim();
-  if (e.includes("(") || e.includes(")")) throw new Error(`unsupported expression: ${e}`);
+  const bare = e.replace(CALL, "");
+  if (bare.includes("(") || bare.includes(")")) throw new Error(`unsupported expression: ${e}`);
   const or = e.split("||");
   if (or.length > 1) return or.some((part) => truthy(evaluate(part, ctx)));
   const and = e.split("&&");
@@ -133,6 +159,13 @@ export function evaluate(expr: string, ctx: Context): string | boolean {
 }
 
 const truthy = (v: string | boolean): boolean => v !== false && v !== "";
+
+/** An `if:` as GitHub runs it: without a status function it is `success() && (<if>)`. */
+function condition(expr: Yaml | undefined, ctx: Context): boolean {
+  const text = expr === undefined ? "" : String(expr);
+  if (!STATUS_CALL.test(text)) return ctx.status!.success && (expr === undefined || truthy(evaluate(text, ctx)));
+  return truthy(evaluate(text, ctx));
+}
 
 function substitute(text: string, ctx: Context): string {
   return text.replace(/\$\{\{([\s\S]*?)\}\}/g, (_, expr: string) => String(evaluate(expr, ctx)));
@@ -172,22 +205,26 @@ export async function runEvent(opts: RunnerOptions): Promise<JobRun[]> {
     if (!triggers(workflow, opts.event)) continue;
     if (!isMap(workflow.jobs)) throw new Error(`${file}: no jobs`);
     const done = new Map<string, JobRun["status"]>();
+    /** Each finished job's ancestors' statuses, itself included (success()/failure() look at the whole chain). */
+    const chains = new Map<string, JobRun["status"][]>();
     const pending = Object.entries(workflow.jobs);
     while (pending.length > 0) {
-      const at = pending.findIndex(([, job]) => {
-        const needs = isMap(job) ? job.needs : undefined;
-        const list = needs === undefined || needs === null ? [] : Array.isArray(needs) ? needs.map(String) : [String(needs)];
-        return list.every((n) => done.has(n));
-      });
+      const at = pending.findIndex(([, job]) => needsOf(isMap(job) ? job : {}).every((n) => done.has(n)));
       if (at < 0) throw new Error(`${file}: unsatisfiable needs`);
       const [id, job] = pending.splice(at, 1)[0]!;
       if (!isMap(job)) throw new Error(`${file}: job ${id} is not a map`);
-      const run = await runJob(file, workflow, id, job, done, ctx, opts);
+      const run = await runJob(file, workflow, id, job, done, chains, ctx, opts);
       done.set(id, run.status);
+      chains.set(id, [run.status, ...needsOf(job).flatMap((n) => chains.get(n)!)]);
       runs.push(run);
     }
   }
   return runs;
+}
+
+function needsOf(job: Map_): string[] {
+  const needs = job.needs;
+  return needs === undefined || needs === null ? [] : Array.isArray(needs) ? needs.map(String) : [String(needs)];
 }
 
 async function runJob(
@@ -196,15 +233,19 @@ async function runJob(
   id: string,
   job: Map_,
   done: Map<string, JobRun["status"]>,
-  ctx: Context,
+  chains: Map<string, JobRun["status"][]>,
+  workflowCtx: Context,
   opts: RunnerOptions,
 ): Promise<JobRun> {
   const permissions = job.permissions !== undefined ? job.permissions : workflow.permissions;
   const oidcOffered = grantsIdToken(permissions) && opts.oidc !== undefined;
   const run: JobRun = { workflow: file, job: id, runsOn: job["runs-on"] ?? null, permissions: permissions ?? null, status: "skipped", oidcOffered, steps: [] };
-  const needs = job.needs === undefined || job.needs === null ? [] : Array.isArray(job.needs) ? job.needs.map(String) : [String(job.needs)];
-  if (needs.some((n) => done.get(n) !== "success")) return run;
-  if (job.if !== undefined && !truthy(evaluate(String(job.if), ctx))) return run;
+  const needs = needsOf(job);
+  const ancestors = needs.flatMap((n) => chains.get(n)!);
+  const jobStatus = { success: ancestors.every((s) => s === "success"), failure: ancestors.includes("failure") };
+  const needResults = Object.fromEntries(needs.map((n) => [n, done.get(n)!]));
+  const ctx: Context = { ...workflowCtx, needs: needResults, status: jobStatus };
+  if (!condition(job.if, ctx)) return run;
 
   const tmp = mkdtempSync(join(tmpdir(), "gha-"));
   try {
@@ -229,7 +270,8 @@ async function runJob(
     for (const [i, step] of steps.entries()) {
       if (!isMap(step)) throw new Error(`${file}: ${id} step ${i} is not a map`);
       const name = String(step.name ?? step.uses ?? step.run ?? `step ${i}`);
-      if (run.status === "failure" || (step.if !== undefined && !truthy(evaluate(String(step.if), ctx)))) {
+      const stepCtx: Context = { ...ctx, status: { success: run.status !== "failure", failure: run.status === "failure" } };
+      if (!condition(step.if, stepCtx)) {
         run.steps.push({ name, status: "skipped", output: "" });
         continue;
       }
@@ -241,8 +283,8 @@ async function runJob(
       }
       if (typeof step.run !== "string") throw new Error(`${file}: ${id} step ${name} has neither run nor uses`);
       if (step.shell !== undefined) throw new Error(`${file}: ${id} step ${name}: shell is not emulated`);
-      const env = { ...base, ...envOf(step.env, ctx) };
-      const [status, output] = await runScript(substitute(step.run, ctx), opts.workspace, env, tmp);
+      const env = { ...base, ...envOf(step.env, stepCtx) };
+      const [status, output] = await runScript(substitute(step.run, stepCtx), opts.workspace, env, tmp);
       const ok = status === 0;
       run.steps.push({ name, status: ok ? "success" : "failure", output });
       if (!ok) run.status = "failure";

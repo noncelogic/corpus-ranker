@@ -147,7 +147,7 @@ second look, a changed mind, or an anomaly report can still stop the merge.
 | Rule | Enforced by |
 | --- | --- |
 | PR required, force-push/deletion blocked, conversations resolved | Branch protection on `main` (applies to admins too) |
-| Every job main runs is proven on the PR first (policy main-stays-green) | Branch protection on `main`: strict (branch up to date with `main`), required status check `ci-result` (ci.yml; needs every other ci.yml job, including `image`, the PR dry run of publish.yml's build) |
+| Every job main runs is proven on the PR first (policy main-stays-green) | Branch protection on `main`: strict (branch up to date with `main`), required status check `ci-result` (ci.yml; needs every other ci.yml job, including `image`, the PR dry run of publish.yml's build); declared in `devops/github/branch-protection.json`, read back with `node deploy/github/check-branch-protection.ts` |
 | Sensitive-path review | CODEOWNERS + required code-owner review |
 | External CI gated, read-only token, no secrets to forks | Actions settings: approval for all external contributors; default workflow permissions = read |
 | Owner-only policy changes | CODEOWNERS on `.github/`, this file, CONTRIBUTING.md, SECURITY.md |

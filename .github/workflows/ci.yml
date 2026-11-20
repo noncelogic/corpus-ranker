@@ -52,8 +52,8 @@ jobs:
       - name: Build
         run: docker build -t corpus-ranker:ci .
 
-  # The one required status check on main (strict; docs/EXTERNAL-REVIEW.md
-  # enforcement map). It needs every other job in this workflow and passes
+  # The one required status check on main (strict; declared in
+  # devops/github/branch-protection.json). It needs every other job in this workflow and passes
   # only when all of them succeeded, so a job added here gates merges once it
   # is listed under needs (tests/deploy/ci-gate.test.ts enforces that).
   ci-result:

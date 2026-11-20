@@ -24,7 +24,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { runEvent, type JobRun, type WorkflowEvent } from "./workflow-runner.ts";
+import { readWorkflow, runEvent, type JobRun, type WorkflowEvent } from "./workflow-runner.ts";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const workflowsDir = resolve(repoRoot, ".github", "workflows");
@@ -32,6 +32,8 @@ const REGISTRY = "noncelogicci.azurecr.io";
 const IMAGE = `${REGISTRY}/corpus-ranker`;
 /** Labels the ranker's dedicated runner carries (meta-harness devops/aks/corpus-ranker-argo/README.md). */
 const RUNNER_LABELS = ["self-hosted", "aks", "corpus-ranker-ci"];
+/** Stand-in docker image state (build records platform and labels, image inspect reads them back). */
+const FAKE_DOCKER = resolve(repoRoot, "tests", "ci", "fake-docker.sh");
 
 const SHA = "6ab0ef3fcd436dbd8075c030382ee75b6005a10b";
 const PUSH_MAIN: WorkflowEvent = { name: "push", ref: "refs/heads/main", sha: SHA };
@@ -107,7 +109,14 @@ interface Simulation {
  * decoy of the old runner mount, holding a different credential, is offered
  * to every step as REGISTRY_PUSH_DIR: nothing may use it.
  */
-async function simulate(t: TestContext, event: WorkflowEvent, estate: Estate, workflows?: string[]): Promise<Simulation> {
+async function simulate(
+  t: TestContext,
+  event: WorkflowEvent,
+  estate: Estate,
+  workflows?: string[],
+  /** Extra host environment, e.g. the stand-in docker's FAKE_DOCKER_* faults. */
+  extraEnv: Record<string, string> = {},
+): Promise<Simulation> {
   const fake = await fakeEstate(t, estate);
   const dir = mkdtempSync(join(tmpdir(), "publish-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -117,11 +126,15 @@ async function simulate(t: TestContext, event: WorkflowEvent, estate: Estate, wo
   writeFileSync(join(decoy, "registry"), `${REGISTRY}\n`);
   writeFileSync(join(decoy, "username"), "mounted-user\n");
   writeFileSync(join(decoy, "password"), "mounted-password\n");
+  const dockerState = join(dir, "docker-state");
+  mkdirSync(dockerState);
   for (const tool of ["docker", "npm", "kustomize"]) {
     writeFileSync(
       join(bin, tool),
-      `#!/bin/sh\necho "${tool} $*" >> "${dir}/calls"\n` +
-        (tool === "docker" ? `case "$1" in login) cat > "${dir}/login-stdin" ;; esac\n` : "") +
+      `#!/bin/bash\nargs="$*"; echo "${tool} \${args//$'\\n'/ }" >> "${dir}/calls"\n` +
+        (tool === "docker"
+          ? `case "$1" in login) cat > "${dir}/login-stdin" ;; esac\nDOCKER_STATE="${dockerState}"\n. "${FAKE_DOCKER}" "$@"\n`
+          : "") +
         "exit 0\n",
     );
     chmodSync(join(bin, tool), 0o755);
@@ -134,7 +147,7 @@ async function simulate(t: TestContext, event: WorkflowEvent, estate: Estate, wo
     workspace: repoRoot,
     repository: "noncelogic/corpus-ranker",
     vars: { OPENBAO_ADDR: fake.url },
-    hostEnv: { PATH: `${bin}:${process.env.PATH}`, HOME: dir, REGISTRY_PUSH_DIR: decoy },
+    hostEnv: { PATH: `${bin}:${process.env.PATH}`, HOME: dir, REGISTRY_PUSH_DIR: decoy, ...extraEnv },
     oidc: { url: `${fake.url}/oidc?api-version=2.0`, token: OIDC_REQUEST_TOKEN },
   });
   const read = (f: string): string | undefined => {
@@ -231,4 +244,114 @@ test("ci.yml no longer publishes, so each merge to main pushes the image exactly
   for (const j of pr.jobs) {
     assert.ok(!JSON.stringify(j.runsOn).includes("self-hosted"), `${j.workflow}/${j.job} stays off self-hosted runners`);
   }
+});
+
+// CR-GATE-IMAGE-DRYRUN acceptance (policy main-stays-green): ci.yml's `image`
+// job is the declared, secret-free pull-request dry run of publish.yml's
+// `image` job. Both build through the one definition in
+// .github/scripts/image-build.sh, and the dry run checks the built image's
+// manifest platform and metadata labels against what publish pushes, under
+// the strict ci-result gate (devops/github/branch-protection.json).
+
+const PR_TAG = "corpus-ranker:ci";
+const PUBLISH_TAG = `${IMAGE}:sha-${SHA}`;
+const LABELS = [
+  "org.opencontainers.image.source=https://github.com/noncelogic/corpus-ranker",
+  `org.opencontainers.image.revision=${SHA}`,
+];
+
+type Jobs = Record<string, Record<string, unknown>>;
+const jobsOf = (file: string): Jobs => readWorkflow(resolve(workflowsDir, file)).jobs as unknown as Jobs;
+const ciJob = (sim: Simulation, id: string): JobRun => {
+  const j = sim.jobs.find((x) => x.workflow === "ci.yml" && x.job === id);
+  assert.ok(j, `ci.yml ran no job ${id}`);
+  return j;
+};
+const builds = (sim: Simulation): string[] => sim.calls.filter((c) => c.startsWith("docker build "));
+
+test("ci.yml's image job declares DRY_RUN_OF image and builds from the same build inputs as publish.yml's image job", async (t) => {
+  const ci = jobsOf("ci.yml");
+  const publish = jobsOf("publish.yml");
+  assert.deepEqual(ci.image?.env, { DRY_RUN_OF: "image" }, "ci.yml's image job declares DRY_RUN_OF: image");
+  assert.ok(publish[String((ci.image!.env as Record<string, string>).DRY_RUN_OF)], "DRY_RUN_OF names publish.yml's image job");
+
+  // One shared definition: neither workflow spells out its own docker build.
+  for (const file of ["ci.yml", "publish.yml"]) {
+    const source = readFileSync(resolve(workflowsDir, file), "utf8");
+    assert.doesNotMatch(source, /docker\s+(buildx\s+)?build/, `${file} builds only through .github/scripts/image-build.sh`);
+    assert.match(source, /\. \.github\/scripts\/image-build\.sh/, `${file} sources the shared build definition`);
+  }
+
+  // Run as written: the pull request's build and main's publish build pass
+  // docker the same Dockerfile, context, platform, build arguments and
+  // labels; only the tag differs.
+  const pr = await simulate(t, PULL_REQUEST, { creds: GOOD }, ["ci.yml"]);
+  const main = await simulate(t, PUSH_MAIN, { creds: GOOD }, ["publish.yml"]);
+  assert.equal(builds(pr).length, 1, pr.calls.join("\n"));
+  assert.equal(builds(main).length, 1, main.calls.join("\n"));
+  const expected = `docker build -f Dockerfile --platform linux/amd64 ${LABELS.map((l) => `--label ${l}`).join(" ")} -t <tag> .`;
+  assert.equal(builds(pr)[0]!.replace(` -t ${PR_TAG} `, " -t <tag> "), expected, "the pull request builds from the shared inputs");
+  assert.equal(builds(main)[0]!.replace(` -t ${PUBLISH_TAG} `, " -t <tag> "), expected, "publish builds from the shared inputs");
+  assert.equal(ciJob(pr, "image").status, "success", pr.output);
+});
+
+test("the pull-request image job fails when the built image's manifest or metadata labels differ from what publish pushes", async (t) => {
+  // The build as defined passes the check, and the check really reads the built image.
+  const ok = await simulate(t, PULL_REQUEST, { creds: GOOD }, ["ci.yml"]);
+  assert.equal(ciJob(ok, "image").status, "success", ok.output);
+  assert.ok(ok.calls.some((c) => c.startsWith(`docker image inspect `) && c.endsWith(` ${PR_TAG}`)), ok.calls.join("\n"));
+  assert.equal(ciJob(ok, "ci-result").status, "success", ok.output);
+
+  const faults: Array<[string, Record<string, string>, RegExp]> = [
+    ["another platform", { FAKE_DOCKER_PLATFORM: "linux/arm64" }, /platform linux\/arm64, publish pushes linux\/amd64/],
+    ["a missing source label", { FAKE_DOCKER_DROP_LABEL: "org.opencontainers.image.source" }, /label org\.opencontainers\.image\.source/],
+    [
+      "another revision label",
+      { FAKE_DOCKER_SET_LABEL: `org.opencontainers.image.revision=${"0".repeat(40)}` },
+      /label org\.opencontainers\.image\.revision is not 6ab0ef3/,
+    ],
+  ];
+  for (const [what, env, message] of faults) {
+    const bad = await simulate(t, PULL_REQUEST, { creds: GOOD }, ["ci.yml"], env);
+    const image = ciJob(bad, "image");
+    assert.equal(image.status, "failure", `an image with ${what} must fail the pull-request image job`);
+    assert.match(image.steps.at(-1)!.output, message, `${what}: ${bad.output}`);
+    assert.equal(ciJob(bad, "ci-result").status, "failure", `${what}: the required ci-result check fails`);
+  }
+});
+
+test("pull-request runs never contact OpenBao, and ci-result needs the image job", async (t) => {
+  const pr = await simulate(t, PULL_REQUEST, { creds: GOOD });
+  assert.deepEqual(pr.jobs.filter((j) => j.workflow !== "ci.yml"), [], "only ci.yml runs for a pull request");
+  assert.deepEqual(pr.requests, [], "no OIDC token endpoint or OpenBao request");
+  for (const j of pr.jobs) {
+    assert.equal(j.oidcOffered, false, `${j.workflow}/${j.job} cannot mint an OIDC token`);
+    assert.ok(!JSON.stringify(j.runsOn).includes("self-hosted"), `${j.workflow}/${j.job} stays off self-hosted runners`);
+  }
+  // The image job talks to docker only to build and inspect locally: no
+  // registry login, push or pull, and nothing from the runner mount decoy.
+  assert.deepEqual(
+    pr.calls.filter((c) => c.startsWith("docker ")).map((c) => c.split(" ").slice(0, 3).join(" ")),
+    ["docker build -f", "docker image inspect"],
+    pr.calls.join("\n"),
+  );
+  assert.doesNotMatch(pr.calls.join("\n") + pr.output, /mounted-/, "no runner-mounted credential is restored");
+  // What ci.yml declares and runs (comments aside) names no credential source.
+  const ciSource = readFileSync(resolve(workflowsDir, "ci.yml"), "utf8")
+    .split("\n")
+    .filter((l) => !l.trim().startsWith("#"))
+    .join("\n");
+  for (const forbidden of [/OPENBAO/, /id-token/, /estate-registry-credential/, /REGISTRY_PUSH_DIR|\/etc\/registry-push/, /secrets\./]) {
+    assert.doesNotMatch(ciSource, forbidden, `ci.yml references ${forbidden}`);
+  }
+
+  // ci-result needs the image job and is the strict required check on main.
+  const ci = jobsOf("ci.yml");
+  assert.ok((ci["ci-result"]!.needs as string[]).includes("image"), "ci-result needs image");
+  const protection = JSON.parse(readFileSync(resolve(repoRoot, "devops", "github", "branch-protection.json"), "utf8")) as {
+    required_status_checks: { strict: boolean; contexts: string[] };
+  };
+  assert.equal(protection.required_status_checks.strict, true, "main's protection stays strict");
+  assert.ok(protection.required_status_checks.contexts.includes("ci-result"), "ci-result stays the required check");
+  assert.equal(ciJob(pr, "ci-result").status, "success", pr.output);
 });

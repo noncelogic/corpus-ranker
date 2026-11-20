@@ -59,13 +59,21 @@ done
 `;
 mkdirSync(binDir);
 for (const tool of ["npm", "kustomize", "docker"]) {
-  writeFileSync(join(binDir, tool), STAND_IN);
+  // docker also keeps image state, so the image job's manifest and label
+  // check (.github/scripts/image-build.sh image_verify) reads what was built.
+  const fakeDocker = resolve(repoRoot, "tests", "ci", "fake-docker.sh");
+  writeFileSync(join(binDir, tool), STAND_IN + (tool === "docker" ? `. "${fakeDocker}" "$@"\n` : ""));
   chmodSync(join(binDir, tool), 0o755);
 }
+const dockerState = join(work, "docker-state");
+mkdirSync(dockerState);
+
+// What the Actions runner sets and the image build definition labels the image with.
+const ACTIONS_ENV = { GITHUB_REPOSITORY: "noncelogic/corpus-ranker", GITHUB_SHA: "6ab0ef3fcd436dbd8075c030382ee75b6005a10b" };
 
 function runCi(event: WorkflowEvent, failJobs: string[] = []): { run: Run; calls: string[] } {
   writeFileSync(callLog, "");
-  const run = runWorkflow(workflow, { event, binDir, cwd: repoRoot, env: { CALL_LOG: callLog, FAIL_JOBS: failJobs.join(" ") } });
+  const run = runWorkflow(workflow, { event, binDir, cwd: repoRoot, env: { CALL_LOG: callLog, FAIL_JOBS: failJobs.join(" "), DOCKER_STATE: dockerState, ...ACTIONS_ENV } });
   return { run, calls: readFileSync(callLog, "utf8").split("\n").filter(Boolean) };
 }
 
@@ -106,7 +114,11 @@ test("every ci.yml job main runs also runs on the pull request, with the same ou
   }
   // The pull request really runs the image build main runs.
   const { calls } = runCi(PULL_REQUEST);
-  assert.ok(calls.includes("image docker build -t corpus-ranker:ci ."), `the image job builds the image on the pull request; calls: ${calls.join(" | ")}`);
+  assert.ok(
+    calls.some((c) => /^image docker build .* -t corpus-ranker:ci \.$/.test(c)),
+    `the image job builds the image on the pull request; calls: ${calls.join(" | ")}`,
+  );
+  assert.ok(calls.some((c) => c.startsWith("image docker image inspect ")), "the image job checks the built image");
 });
 
 test("ci-result reports on every outcome and passes only when every other job succeeded", () => {

@@ -92,12 +92,39 @@ export function verifyExport(dir: string, required: string[]): void {
   }
 }
 
+/** Reject legacy scored exports before any write can silently drop their scores. */
+function verifyScoreFormat(dir: string, files: string[]): void {
+  let legacyCount = 0;
+  for (const file of files) {
+    for (const line of splitLines(readFileSync(join(dir, file)))) {
+      const text = line.toString("utf8").trim();
+      if (!text) continue;
+      let record: unknown;
+      try {
+        record = JSON.parse(text);
+      } catch {
+        continue; // Existing per-record import diagnostics handle malformed JSON.
+      }
+      if (isObject(record) && record.scores == null &&
+          (typeof record.relevance === "number" || typeof record.technical_merit === "number")) {
+        legacyCount++;
+      }
+    }
+  }
+  if (legacyCount > 0) {
+    throw new ExportIntegrityError(
+      `${legacyCount} record(s) have legacy top-level paper scores. Supply a verified score conversion with scorer and scored_at before importing.`,
+    );
+  }
+}
+
 /** Import the export in `opts.dir`; resolves with the counts (failed > 0 means the import failed). */
 export async function runCorpusImport(opts: CorpusImportOptions): Promise<CorpusImportCounts> {
   const files = opts.files ?? WEEKLY_FILES;
   const log = opts.log ?? ((line: string) => process.stdout.write(line + "\n"));
   const doFetch = opts.fetch ?? fetch;
   verifyExport(opts.dir, files);
+  verifyScoreFormat(opts.dir, files);
 
   const base = opts.apiUrl.replace(/\/+$/, "");
   const captureUrl = `${base}/v1/corpora/${encodeURIComponent(opts.corpusId)}/originals`;

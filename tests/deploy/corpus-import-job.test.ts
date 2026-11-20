@@ -29,6 +29,7 @@ import { join, relative, resolve } from "node:path";
 import { score as scoreHandler } from "../../src/api/score.ts";
 import { loadContracts, openapiUri } from "../../src/contracts/index.ts";
 import type { Queryable } from "../../src/db/client.ts";
+import { runCorpusImport } from "../../src/import/corpus-import-job.ts";
 import { paperRubricV1 } from "../../src/import/paper-rubric.ts";
 import { deployDir, kustomizeBuild, parseYamlDocs, renderObjects, repoRoot, type K8sObject } from "./render.ts";
 
@@ -399,4 +400,28 @@ test("the rendered import Job mounts juno-papers-export read-only, checks SHA256
   const directStatus = await new Promise<number | null>((ok) => direct.on("close", ok));
   assert.notEqual(directStatus, 0);
   assert.equal(api.calls.length, 0, "the importer posts nothing over a mismatched export");
+});
+
+test("legacy Juno rubric fields fail before any HTTP write", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "ranker-legacy-scores-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const file = WEEKS[0]!;
+  const paper = JSON.stringify({ arxiv_id: "2610.00001", relevance: 5, technical_merit: 4 }) + "\n";
+  writeFileSync(join(dir, file), paper);
+  const checksum = createHash("sha256").update(paper).digest("hex");
+  writeFileSync(join(dir, "SHA256SUMS"), `${checksum}  ${file}\n`);
+  let requests = 0;
+  await assert.rejects(runCorpusImport({
+    dir,
+    files: [file],
+    apiUrl: "http://127.0.0.1",
+    apiKey: "test",
+    corpusId: "cr_corpus_papers",
+    capturedBy: "agent:corpus-import",
+    fetch: async () => {
+      requests++;
+      throw new Error("unexpected import request");
+    },
+  }), /1 record\(s\) have legacy top-level paper scores/);
+  assert.equal(requests, 0);
 });

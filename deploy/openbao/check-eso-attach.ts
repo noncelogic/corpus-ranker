@@ -32,7 +32,8 @@
 // secret, and prints only what it compares. Exit 0: everything matches.
 // Exit 1: each difference is named on stderr, one per line. Exit 2: the reads
 // failed for another reason (unreachable, permission denied), the manifest
-// is unreadable, or a usage error.
+// or a policy file it names is unreadable or grants more than read on one
+// exact kv/corpus-ranker/<purpose> path, or a usage error.
 import { readFileSync } from "node:fs";
 import { relative, resolve } from "node:path";
 import { bao, comparePolicy, parsePolicy, quote, ReadError } from "./policy-grants.ts";

@@ -59,7 +59,13 @@ names missing from the role's `token_policies` after the existing ones
 policy, then reads back both the policy bytes and the role: `token_policies`
 must be the snapshot's list followed by the appended names, and every other
 role setting must equal the snapshot (exit 1 names each difference, exit 2 a
-failed read or write or an absent role). A second run writes nothing. Its last
+failed read or write or an absent role). Before touching OpenBao it refuses,
+with exit 2, a manifest policy file that grants anything but read on exactly
+one `kv/corpus-ranker/<purpose>` path, or two policies granting the same
+path; the readback below refuses them the same way
+(`tests/deploy/external-secrets-policies.test.ts`, CR-M3-D2e, holds the
+refusals and an apply from main after which each attached policy alone reads
+its one custody path and nothing else). A second run writes nothing. Its last
 stdout line is a JSON record (role, `token_policies` before and after, the
 appended names, each policy file's sha256, `settings_preserved`) that goes
 into meta-harness devops/openbao/README.md as the deploy record.

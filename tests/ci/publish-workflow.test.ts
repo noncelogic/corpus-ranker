@@ -276,6 +276,26 @@ test("publish logs in through OpenBao JWT role corpus-ranker-registry-push and n
   assert.ok(!wrong.output.includes(PASSWORD), "the password is not printed on refusal");
 });
 
+test("publish installs node before the Publish step runs the credential script on the node-less self-hosted runner", async (t) => {
+  // Red main 44693705144..44824828516: every publish since CR-PUBLISH-OIDC
+  // failed on runner corpus-ranker-ci-aks-01 with `node: command not found`,
+  // so no sha-<commit> image reached the registry for the rollout to pin.
+  // The local runner gives a self-hosted job no node until setup-node runs.
+  const workflow = readWorkflow(resolve(workflowsDir, "publish.yml"));
+  const steps = ((workflow.jobs as Record<string, { steps: { name?: string; uses?: string; with?: Record<string, unknown> }[] }>).image).steps;
+  const setup = steps.findIndex((s) => String(s.uses ?? "").startsWith("actions/setup-node@"));
+  const publish = steps.findIndex((s) => s.name === "Publish");
+  assert.ok(setup >= 0 && setup < publish, "a pinned actions/setup-node step precedes Publish");
+  assert.match(String(steps[setup]!.uses), /^actions\/setup-node@[0-9a-f]{40}$/, "setup-node is pinned to a commit");
+  assert.equal(String(steps[setup]!.with?.["node-version"]), "24", "the same Node major as ci.yml and the image");
+
+  const ok = await simulate(t, PUSH_MAIN, { creds: GOOD }, { workflows: ["publish.yml"] });
+  const job = publishJob(ok);
+  assert.equal(job.status, "success", ok.output);
+  assert.doesNotMatch(ok.output, /command not found/);
+  assert.deepEqual(ok.calls.filter((c) => c.startsWith("docker push ")), [`docker push ${IMAGE}:sha-${SHA}`]);
+});
+
 test("ci.yml no longer publishes, so each merge to main pushes the image exactly once", async (t) => {
   // A merge to main: every workflow it triggers runs, and exactly one image
   // push happens in total — publish.yml's SHA tag. ci.yml's image job only

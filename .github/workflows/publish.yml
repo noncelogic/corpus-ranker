@@ -18,8 +18,9 @@ name: publish
 # which never prints the OIDC token, the OpenBao token or the password. No
 # GitHub token is used for the push, so the job holds no `packages`
 # permission; `id-token: write` only lets it mint the OIDC token. Plain docker
-# CLI, no third-party actions. Publishing is the end of the pipeline: rollout
-# of deploy/ is estate-side GitOps, and nothing here contacts a cluster.
+# CLI; the only actions are GitHub's own checkout and setup-node. Publishing
+# is the end of the pipeline: rollout of deploy/ is estate-side GitOps, and
+# nothing here contacts a cluster.
 on:
   push:
     branches: [main]
@@ -52,6 +53,14 @@ jobs:
         run: |
           . .github/scripts/image-build.sh
           image_build "${IMAGE}:sha-${GITHUB_SHA}"
+      # The self-hosted runner image has no node on PATH, and Publish runs
+      # estate-registry-credential.mjs with it (every publish from 14095ff to
+      # d3fdce7 failed with `node: command not found`, so no sha-<commit>
+      # image reached the registry). Same pinned action and Node major as
+      # ci.yml. No cache: the job installs no packages.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
       - name: Publish
         env:
           OPENBAO_ADDR: ${{ vars.OPENBAO_ADDR }}

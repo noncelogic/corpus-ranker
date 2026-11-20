@@ -88,3 +88,38 @@ test("expressions outside the supported subset are still refused, never guessed"
   assert.throws(() => evaluate("(github.ref == 'x') && true", ctx), /unsupported/);
   assert.throws(() => evaluate("hashFiles('**/x')", ctx), /unsupported/);
 });
+
+// The estate's self-hosted runner image has no node on PATH (red publish
+// 44693705144..44824828516 on runner corpus-ranker-ci-aks-01: `node: command
+// not found`); a GitHub-hosted image has it preinstalled. The local runner
+// models both, so a self-hosted job that runs node without setup-node fails here.
+async function runNodeJob(t: TestContext, runsOn: string, setupNode: boolean): Promise<JobRun> {
+  const dir = mkdtempSync(join(tmpdir(), "runner-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const setup = setupNode ? "      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0\n        with:\n          node-version: 24\n" : "";
+  writeFileSync(
+    join(dir, "node.yml"),
+    `name: node\non:\n  push:\n    branches: [main]\njobs:\n  run:\n    runs-on: ${runsOn}\n    steps:\n${setup}      - run: node -e "console.log('ran node')"\n`,
+  );
+  const [job] = await runEvent({
+    workflowsDir: dir,
+    event: { name: "push", ref: "refs/heads/main", sha: "0".repeat(40) },
+    workspace: dir,
+    repository: "noncelogic/corpus-ranker",
+    hostEnv: { PATH: process.env.PATH ?? "", HOME: dir },
+  });
+  return job!;
+}
+
+test("a self-hosted job has no node until setup-node installs it; a hosted job has it preinstalled", async (t) => {
+  const bare = await runNodeJob(t, "[self-hosted, corpus-ranker-ci]", false);
+  assert.equal(bare.status, "failure");
+  assert.match(bare.steps.at(-1)!.output, /node: command not found/);
+
+  const setUp = await runNodeJob(t, "[self-hosted, corpus-ranker-ci]", true);
+  assert.equal(setUp.status, "success", setUp.steps.map((s) => s.output).join("\n"));
+  assert.match(setUp.steps.at(-1)!.output, /ran node/);
+
+  const hosted = await runNodeJob(t, "ubuntu-latest", false);
+  assert.equal(hosted.status, "success", hosted.steps.map((s) => s.output).join("\n"));
+});

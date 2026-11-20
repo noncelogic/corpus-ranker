@@ -137,3 +137,31 @@ test("a score that breaks the contract or its policy version is refused", async 
   }
   assert.equal(countScores(), before, "nothing was stored");
 });
+
+test("a score made earlier keeps its own scored_at; a future one is refused", async () => {
+  const before = countScores();
+  for (const [given, stored] of [
+    ["2026-10-01T00:00:00Z", "2026-10-01T00:00:00.000Z"],
+    ["2026-10-07T11:15:00+02:00", "2026-10-07T09:15:00.000Z"],
+  ] as const) {
+    const res = await score(request({ scored_at: given }));
+    assert.equal(res.status, 201, given);
+    const { score_event_id } = (await res.json()) as { score_event_id: string };
+    assert.equal(
+      db.psql(`select to_char(scored_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') from score_events where id = '${score_event_id}'`),
+      stored,
+      "the given date is stored, not the time of recording",
+    );
+  }
+  assert.equal(countScores(), before + 2);
+
+  for (const [name, body] of [
+    ["in the future", request({ scored_at: "2026-11-17T00:00:00Z" })],
+    ["not a date-time", request({ scored_at: "2026-10-01" })],
+  ] as const) {
+    const res = await score(body);
+    assert.equal(res.status, 400, name);
+    assert.deepEqual(contracts.registry.validate(await res.json(), ERROR), [], name);
+  }
+  assert.equal(countScores(), before + 2, "nothing more was stored");
+});

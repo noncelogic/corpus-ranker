@@ -17,6 +17,7 @@ apiVersion: postgresql.cnpg.io/v1
 kind: Cluster
 metadata:
   name: ranker-db
+  namespace: corpus-ranker
   annotations:
     argocd.argoproj.io/sync-wave: "3"
 spec:

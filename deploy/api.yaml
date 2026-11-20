@@ -10,14 +10,34 @@
 # service refuses to start without its API key set or object-store
 # credentials (src/config.ts loadServiceConfig);
 # tests/deploy/external-secrets.test.ts holds the wiring.
-apiVersion: apps/v1
-kind: Deployment
+#
+# Rollout (CR-D1-PROMOTE): the API is an Argo Rollouts blue/green Rollout
+# (TECH-STACK §10, DV-61). A new revision starts behind the preview Service
+# (ranker-api-preview); the Rollout switches the active Service (ranker-api,
+# the one clients call) to it only once every new pod is Ready, which is when
+# its readiness probe GET /readyz answers 200: the database and the object
+# store both answer it (src/api/readiness.ts). Auto-promotion has no timer and
+# no partial preview, so an unready revision is never promoted and the old
+# one keeps serving. Liveness (/healthz) is independent of both dependencies,
+# so an outage takes pods out of service without restarting them.
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
 metadata:
   name: ranker-api
+  namespace: corpus-ranker
   annotations:
     argocd.argoproj.io/sync-wave: "8"
 spec:
   replicas: 1
+  revisionHistoryLimit: 3
+  strategy:
+    blueGreen:
+      activeService: ranker-api
+      previewService: ranker-api-preview
+      autoPromotionEnabled: true
+      # The old revision stays up briefly after the switch, so in-flight
+      # requests and endpoint propagation finish against it.
+      scaleDownDelaySeconds: 30
   selector:
     matchLabels:
       app.kubernetes.io/name: ranker-api
@@ -72,11 +92,16 @@ spec:
           ports:
             - name: http
               containerPort: 8080
+          # Gates promotion: 200 only while the database and the object store
+          # both answer, each check bounded at 2s in the service
+          # (DEFAULT_READINESS_TIMEOUT_MS), inside this probe's timeout.
           readinessProbe:
             httpGet:
-              path: /healthz
+              path: /readyz
               port: http
             periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
           livenessProbe:
             httpGet:
               path: /healthz
@@ -103,11 +128,31 @@ spec:
           secret:
             secretName: ranker-api-keys
 ---
-# Estate-internal only (ClusterIP); deliberately no Ingress.
+# The active Service: estate-internal only (ClusterIP); deliberately no
+# Ingress. The Rollout points it at the promoted revision's pods.
 apiVersion: v1
 kind: Service
 metadata:
   name: ranker-api
+  namespace: corpus-ranker
+  annotations:
+    argocd.argoproj.io/sync-wave: "8"
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: ranker-api
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+# The preview Service: the new revision's pods before promotion, for checks
+# against it; estate-internal only.
+apiVersion: v1
+kind: Service
+metadata:
+  name: ranker-api-preview
+  namespace: corpus-ranker
   annotations:
     argocd.argoproj.io/sync-wave: "8"
 spec:

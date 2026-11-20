@@ -44,6 +44,7 @@ test("Juno backfill initializes an empty papers corpus and is safe to rerun", as
     async put(key: string, data: Buffer) { blobs.set(key, data); },
     async get(key: string) { return blobs.get(key) ?? null; },
     uri(key: string) { return `test:${key}`; },
+    async ping() {},
   };
   const expected = { records: 1, originals: 1, items: 1, scores: 1 };
   assert.deepEqual(await importHistoricalExport(dir, db, store), expected);

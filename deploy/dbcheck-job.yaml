@@ -15,6 +15,7 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: ranker-db-check
+  namespace: corpus-ranker
   annotations:
     argocd.argoproj.io/hook: PostSync
     argocd.argoproj.io/sync-wave: "0"

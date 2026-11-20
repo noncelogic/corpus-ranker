@@ -62,12 +62,13 @@ function secretsRead(podSpec: Record<string, any>): Read[] {
   return reads;
 }
 
-test("every ExternalSecret the rendered ranker Deployment reads is in an earlier Argo CD sync wave than the Deployment", () => {
+test("every ExternalSecret the rendered ranker workloads read is in an earlier Argo CD sync wave than the workload", () => {
   const objects = renderObjects();
-  const deployments = objects.filter((o) => o.kind === "Deployment");
+  // The API is a Rollout (deploy/api.yaml); MinIO is a Deployment.
+  const deployments = objects.filter((o) => o.kind === "Deployment" || o.kind === "Rollout");
   assert.ok(
-    deployments.some((d) => d.metadata.name === "ranker-api"),
-    "the ranker Deployment ranker-api is not rendered",
+    deployments.some((d) => d.kind === "Rollout" && d.metadata.name === "ranker-api"),
+    "the ranker API Rollout ranker-api is not rendered",
   );
   const externalSecrets = objects.filter((o) => o.kind === "ExternalSecret");
   const target = (es: K8sObject): string => es.spec?.target?.name ?? es.metadata.name;
@@ -111,5 +112,5 @@ test("every ExternalSecret the rendered ranker Deployment reads is in an earlier
       }
     }
   }
-  assert.ok(dbChecked, `no Deployment reads ${DB_ENV} from a Secret`);
+  assert.ok(dbChecked, `no ranker workload reads ${DB_ENV} from a Secret`);
 });

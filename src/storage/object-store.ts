@@ -11,6 +11,11 @@ export interface ObjectStore {
   get(key: string): Promise<Buffer | null>;
   /** The storage URI an Original records for `key`. */
   uri(key: string): string;
+  /**
+   * Prove the bucket answers to these credentials (a signed HeadBucket);
+   * rejects when it does not. `signal` aborts the request.
+   */
+  ping(signal?: AbortSignal): Promise<void>;
 }
 
 export interface S3Options {
@@ -29,9 +34,16 @@ export function s3ObjectStore(opts: S3Options): ObjectStore {
   const region = opts.region ?? "us-east-1";
   const endpoint = opts.endpoint.replace(/\/+$/, "");
 
-  const request = async (method: "PUT" | "GET", key: string, body?: Buffer, mediaType?: string): Promise<Response> => {
-    if (!KEY.test(key)) throw new Error(`object key must be a SHA-256 hex digest, got ${JSON.stringify(key)}`);
-    const url = new URL(`${endpoint}/${encodeURIComponent(opts.bucket)}/${key}`);
+  /** A signed request for `key` in the bucket, or for the bucket itself when `key` is undefined. */
+  const request = async (
+    method: "PUT" | "GET" | "HEAD",
+    key: string | undefined,
+    body?: Buffer,
+    mediaType?: string,
+    signal: AbortSignal = AbortSignal.timeout(60_000),
+  ): Promise<Response> => {
+    if (key !== undefined && !KEY.test(key)) throw new Error(`object key must be a SHA-256 hex digest, got ${JSON.stringify(key)}`);
+    const url = new URL(`${endpoint}/${encodeURIComponent(opts.bucket)}${key === undefined ? "" : `/${key}`}`);
     const payloadHash = hex(body ?? Buffer.alloc(0));
     const amzDate = new Date().toISOString().replace(/[-:]/g, "").replace(/\.\d{3}/, "");
     const day = amzDate.slice(0, 8);
@@ -56,7 +68,7 @@ export function s3ObjectStore(opts: S3Options): ObjectStore {
       authorization: `AWS4-HMAC-SHA256 Credential=${opts.accessKeyId}/${scope}, SignedHeaders=${signedHeaders}, Signature=${signature}`,
     };
     if (mediaType !== undefined) headers["content-type"] = mediaType;
-    return fetch(url, { method, headers, body: body === undefined ? undefined : new Uint8Array(body), signal: AbortSignal.timeout(60_000) });
+    return fetch(url, { method, headers, body: body === undefined ? undefined : new Uint8Array(body), signal });
   };
 
   return {
@@ -76,5 +88,10 @@ export function s3ObjectStore(opts: S3Options): ObjectStore {
       return Buffer.from(await res.arrayBuffer());
     },
     uri: (key) => `s3://${opts.bucket}/${key}`,
+    async ping(signal) {
+      const res = await request("HEAD", undefined, undefined, undefined, signal);
+      await res.arrayBuffer();
+      if (!res.ok) throw new Error(`object store HEAD bucket ${opts.bucket} failed: HTTP ${res.status}`);
+    },
   };
 }

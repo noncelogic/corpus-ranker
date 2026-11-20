@@ -152,9 +152,9 @@ test("the rendered overlay declares the ranker CNPG cluster with separate migrat
   assert.match(serviceUri, new RegExp(`^postgresql://${SERVICE}:\\{\\{.*\\}\\}@ranker-db-rw\\.corpus-ranker\\.svc(?:\\.cluster\\.local)?:5432/ranker\\b`));
 
   // --- The API connects as the service role, never as the owner.
-  const api = findObject("Deployment", "ranker-api").spec.template.spec.containers.find((c: { name: string }) => c.name === "api");
+  const api = findObject("Rollout", "ranker-api").spec.template.spec.containers.find((c: { name: string }) => c.name === "api");
   assert.deepEqual(secretRef(api, "RANKER_DATABASE_URL"), { name: "ranker-db-service", key: "uri" });
-  const apiSecrets = JSON.stringify(findObject("Deployment", "ranker-api"));
+  const apiSecrets = JSON.stringify(findObject("Rollout", "ranker-api"));
   assert.doesNotMatch(apiSecrets, /ranker-db-migrator|ranker-db-app|ranker-db-superuser/, "the API must not see owner or superuser credentials");
 
   // --- The migration Job: an Argo CD Sync hook, run as the migrator.
@@ -191,7 +191,7 @@ test("the rendered overlay declares the ranker CNPG cluster with separate migrat
   assert.equal(scriptCm.data["migrate.sh"], readFileSync(resolve(deployDir, "db", "migrate.sh"), "utf8"));
 
   // The API itself never runs migrations and never holds DDL rights.
-  assert.equal(findObject("Deployment", "ranker-api").spec.template.spec.initContainers, undefined);
+  assert.equal(findObject("Rollout", "ranker-api").spec.template.spec.initContainers, undefined);
 });
 
 // Go's url.QueryEscape, which text/template's `urlquery` calls: unreserved

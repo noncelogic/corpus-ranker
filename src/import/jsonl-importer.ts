@@ -104,7 +104,7 @@ export class CorpusStore {
   putItem(i: Item): void {
     this.#items.set(i.id, i);
     const arxiv = i.identity_keys.arxiv_id;
-    if (arxiv !== undefined) this.#byArxiv.set(`${i.corpus_id}\0${arxiv}`, i.id);
+    if (arxiv !== undefined && i.identity_keys.publication_version === undefined) this.#byArxiv.set(`${i.corpus_id}\0${arxiv}`, i.id);
     const url = i.identity_keys.url;
     if (url !== undefined) this.#byUrl.set(`${i.corpus_id}\0${url}`, i.id);
   }
@@ -120,6 +120,7 @@ export interface ImportOptions {
   now: string;
   /** Content-addressed storage location prefix; the content hash is appended. */
   storageUriPrefix: string;
+  preservePublicationTransitions?: boolean;
 }
 
 export interface ImportError {
@@ -266,7 +267,16 @@ export function importPapersJsonl(data: Uint8Array | string, store: CorpusStore,
     }
 
     // Classify identity: dedup on arXiv ID.
-    const existing = store.itemByArxivId(arxivId, opts.corpusId);
+    const transition = opts.preservePublicationTransitions && rec.published === true && typeof rec.supersedes === "string";
+    const version = typeof rec.version === "string" && /^v[1-9][0-9]*$/.test(rec.version) ? rec.version : undefined;
+    if (transition && (!version || typeof rec.journal_ref !== "string" || !rec.journal_ref.trim() ||
+        normalizeArxivId(rec.supersedes as string) !== arxivId)) {
+      return fail("invalid publication transition");
+    }
+    const itemId = transition
+      ? shortId("cr_item_", opts.corpusId, arxivId, "publication", version!)
+      : shortId("cr_item_", opts.corpusId, arxivId);
+    const existing = transition ? store.item(itemId) : store.itemByArxivId(arxivId, opts.corpusId);
     let item: Item;
     if (existing !== undefined) {
       report.duplicateRecords++;
@@ -275,13 +285,20 @@ export function importPapersJsonl(data: Uint8Array | string, store: CorpusStore,
     } else {
       const identity: Record<string, string> = { arxiv_id: arxivId, url: `https://arxiv.org/abs/${arxivId}` };
       if (typeof rec.doi === "string" && rec.doi !== "") identity.doi = rec.doi;
+      if (transition) {
+        identity.publication_version = version!;
+        identity.url += version!;
+      }
       item = {
-        id: shortId("cr_item_", opts.corpusId, arxivId),
+        id: itemId,
         corpus_id: opts.corpusId,
         item_type: "paper",
         title,
         summary: null,
-        canonical_fields: canonicalFields(rec, arxivId),
+        canonical_fields: {
+          ...canonicalFields(rec, arxivId),
+          ...(transition ? { journal_ref: rec.journal_ref, supersedes: rec.supersedes, version } : {}),
+        },
         original_ids: [original.id],
         identity_keys: identity,
         status: "active",

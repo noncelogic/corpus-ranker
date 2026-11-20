@@ -34,7 +34,7 @@ export function readHistoricalExport(dir: string, files = WEEKLY_FILES, daily = 
   for (const file of files) {
     const bytes = readFileSync(join(dir, file));
     const report = importPapersJsonl(bytes, corpus, {
-      corpusId, source: file, importedBy: daily ? "agent:research-aggregation" : importer, now: new Date().toISOString(), storageUriPrefix: "staged:",
+      corpusId, source: file, importedBy: daily ? "agent:research-aggregation" : importer, now: new Date().toISOString(), storageUriPrefix: "staged:", preservePublicationTransitions: daily,
     });
     if (report.errors.length) throw new Error(`${file}: ${report.errors.length} invalid paper record(s)`);
     records += report.records;
@@ -121,6 +121,17 @@ export async function importHistoricalExport(dir: string, db: Db, store: ObjectS
       for (const id of i.original_ids) {
         await tx.query("insert into item_originals (item_id,original_id) values ($1,$2) on conflict do nothing", [i.id, id]);
       }
+    }
+    for (const item of items) {
+      if (item.identity_keys.publication_version === undefined) continue;
+      const parent = shortId("cr_item_", corpusId, item.identity_keys.arxiv_id!);
+      const [preprint] = await tx.query<{ id: string }>("select id from items where id=$1 and corpus_id=$2", [parent, corpusId]);
+      if (!preprint) throw new Error("Publication transition has no preprint item");
+      await tx.query(`insert into edges (id,from_id,to_id,edge_type,created_by,evidence)
+        values ($1,$2,$3,'supersedes',$4,$5::jsonb) on conflict (id) do nothing`, [
+        shortId("cr_edge_", item.id, parent, "supersedes"), item.id, parent, "agent:research-aggregation",
+        JSON.stringify({ original_ids: item.original_ids, source_version: item.canonical_fields.supersedes }),
+      ]);
     }
     for (const score of events) {
       await tx.query(`insert into score_events

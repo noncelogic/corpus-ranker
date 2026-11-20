@@ -13,9 +13,11 @@
 // which never prints them (tests/deploy/api-keys-job.test.ts).
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
-import { renderObjects, repoRoot, type K8sObject } from "./render.ts";
+import { spawnSync } from "node:child_process";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { deployDir, renderObjects, repoRoot, type K8sObject } from "./render.ts";
 import { docker, policyPaths, startDevOpenBao } from "./openbao-dev.ts";
 
 const NAMESPACE = "corpus-ranker";
@@ -367,4 +369,112 @@ test("the api-keys policy grants only read on the api-keys custody path and refu
 test("the MinIO policy grants only read on the MinIO custody path and refuses the api-keys path", { timeout: 300_000 }, async (t) => {
   assertExternalSecretsRead(renderObjects(), ["ranker-minio", "ranker-minio-service"], "corpus-ranker/minio");
   await assertSinglePathPolicy(t, "external-secrets-corpus-ranker-minio", "corpus-ranker/minio");
+});
+
+// CR-M3-D2c acceptance (Rule: policies/placement-defaults.yaml#estate grants_from_spec;
+// Rule: policies/placement-defaults.yaml#estate secrets): the estate External
+// Secrets role the `openbao` ClusterSecretStore logs in with (eso-obs on mount
+// kubernetes, devops/openbao/kubernetes-roles/eso-obs.attach.json) ends up
+// carrying external-secrets-corpus-ranker-minio and external-secrets-corpus-ranker,
+// byte-identical to devops/openbao/policies, appended after the role's existing
+// policies (eso-sync before the apply) with every other role setting
+// unchanged. deploy/openbao/attach-eso.ts is the apply (CRANK-188): it
+// snapshots the live role, writes each policy, appends only the missing names,
+// then reads policy bytes and the role back. Run here against a throwaway
+// OpenBao holding the role as the estate does before the apply; nothing here
+// reaches the estate.
+const ESO_ROLE = "auth/kubernetes/role/eso-obs";
+const ESO_ATTACHED = ["external-secrets-corpus-ranker-minio", "external-secrets-corpus-ranker"] as const;
+const ESO_PRIOR = "eso-sync";
+
+test("the ExternalSecret store role names both exact-path corpus-ranker read policies", { timeout: 300_000 }, async (t) => {
+  const bao = await startDevOpenBao(t);
+  bao.root("auth", "enable", "kubernetes");
+  docker(["exec", bao.name, "sh", "-c", `printf 'path "kv/data/estate/sync" {\\n  capabilities = ["read"]\\n}\\n' > /tmp/prior.hcl`]);
+  bao.root("policy", "write", ESO_PRIOR, "/tmp/prior.hcl");
+  bao.root("kv", "put", "-mount=kv", "estate/sync", "x=y");
+  bao.root("kv", "put", "-mount=kv", "corpus-ranker/api-keys", "joe=api-secret");
+  bao.root("kv", "put", "-mount=kv", "corpus-ranker/minio", "root-user=r", "root-password=p", "service-user=s", "service-password=q");
+  // The role as the estate holds it before the apply: eso-sync only, with settings of its own that must survive.
+  bao.root(
+    "write", ESO_ROLE,
+    "bound_service_account_names=external-secrets", "bound_service_account_namespaces=external-secrets",
+    `token_policies=${ESO_PRIOR}`, "token_ttl=20m", "token_max_ttl=1h", "audience=openbao", "alias_name_source=serviceaccount_name",
+  );
+  const roleData = (): Record<string, unknown> => JSON.parse(bao.root("read", "-format=json", ESO_ROLE)).data;
+  const snapshot = roleData();
+
+  // `bao` on PATH runs the server's own CLI as root, as an operator logged in to OpenBao would.
+  const dir = mkdtempSync(join(tmpdir(), "dev-bao-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(join(dir, "bao"), `#!/bin/sh\nexec docker exec -i -e BAO_ADDR=http://127.0.0.1:8200 -e BAO_TOKEN=root ${bao.name} bao "$@"\n`);
+  chmodSync(join(dir, "bao"), 0o755);
+  const run = (script: string) => {
+    const r = spawnSync(process.execPath, [resolve(deployDir, "openbao", script)], {
+      encoding: "utf8",
+      cwd: tmpdir(),
+      env: { PATH: `${dir}:${process.env.PATH}`, HOME: process.env.HOME ?? "/tmp" },
+    });
+    if (r.error) throw r.error;
+    return { code: r.status, stdout: r.stdout, output: `${r.stdout}${r.stderr}` };
+  };
+
+  const applied = run("attach-eso.ts");
+  assert.equal(applied.code, 0, applied.output);
+
+  // The role names eso-sync, then both exact-path ranker read policies; nothing else about it changed.
+  const after = roleData();
+  assert.deepEqual(after.token_policies, [ESO_PRIOR, ...ESO_ATTACHED]);
+  assert.deepEqual({ ...after, token_policies: undefined }, { ...snapshot, token_policies: undefined }, "every other role setting is preserved");
+  // Each attached policy is byte-identical to its repository file, and grants one exact path, read-only.
+  for (const name of ESO_ATTACHED) {
+    const file = readFileSync(resolve(repoRoot, "devops", "openbao", "policies", `${name}.hcl`), "utf8");
+    assert.equal(JSON.parse(bao.root("read", "-format=json", `sys/policy/${name}`)).data.rules, file, `${name} is byte-identical to main`);
+    const paths = [...policyPaths(file)];
+    assert.equal(paths.length, 1);
+    assert.deepEqual(paths[0]![1], ["read"]);
+    assert.doesNotMatch(paths[0]![0], /[*+]/);
+  }
+  // The record it prints for devops/openbao/README.md in meta-harness names the before and after lists.
+  const record = JSON.parse(applied.stdout.trim().split("\n").at(-1)!);
+  assert.deepEqual(record.token_policies_before, [ESO_PRIOR]);
+  assert.deepEqual(record.appended, [...ESO_ATTACHED]);
+  assert.deepEqual(record.token_policies_after, [ESO_PRIOR, ...ESO_ATTACHED]);
+  assert.equal(record.settings_preserved, true);
+
+  // A token holding the role's policies reads every path the rendered openbao ExternalSecrets read, and eso-sync's.
+  const token = JSON.parse(bao.root("token", "create", "-format=json", ...(after.token_policies as string[]).map((p) => `-policy=${p}`))).auth.client_token as string;
+  const keys = new Set(renderObjects().filter((o) => o.kind === "ExternalSecret" && o.spec?.secretStoreRef?.name === "openbao").flatMap(remotePaths));
+  for (const key of [...keys].filter((k) => k !== "corpus-ranker/acr-pull")) {
+    const [code, out] = bao.as(token, "kv", "get", "-mount=kv", key);
+    assert.equal(code, 0, `the role cannot read kv/${key}: ${out}`);
+  }
+  assert.equal(bao.as(token, "kv", "get", "-mount=kv", "estate/sync")[0], 0, "eso-sync still grants its path");
+
+  // The readback check agrees, and a second apply changes nothing (no duplicate names).
+  const checked = run("check-eso-attach.ts");
+  assert.equal(checked.code, 0, checked.output);
+  const again = run("attach-eso.ts");
+  assert.equal(again.code, 0, again.output);
+  assert.deepEqual(JSON.parse(again.stdout.trim().split("\n").at(-1)!).appended, []);
+  assert.deepEqual(roleData(), after);
+
+  // A drifted (widened) ranker policy is rewritten to the repository bytes; eso-sync is never written.
+  docker(["exec", bao.name, "sh", "-c", `printf 'path "kv/data/corpus-ranker/*" {\\n  capabilities = ["read", "list"]\\n}\\n' > /tmp/wide.hcl`]);
+  bao.root("policy", "write", ESO_ATTACHED[0], "/tmp/wide.hcl");
+  const prior = bao.root("read", "-format=json", `sys/policy/${ESO_PRIOR}`);
+  const healed = run("attach-eso.ts");
+  assert.equal(healed.code, 0, healed.output);
+  assert.equal(
+    JSON.parse(bao.root("read", "-format=json", `sys/policy/${ESO_ATTACHED[0]}`)).data.rules,
+    readFileSync(resolve(repoRoot, "devops", "openbao", "policies", `${ESO_ATTACHED[0]}.hcl`), "utf8"),
+  );
+  assert.equal(JSON.parse(bao.root("read", "-format=json", `sys/policy/${ESO_PRIOR}`)).data.rules, JSON.parse(prior).data.rules);
+
+  // An absent role is never created: exit 2, and no role appears.
+  bao.root("delete", ESO_ROLE);
+  const absent = run("attach-eso.ts");
+  assert.equal(absent.code, 2, absent.output);
+  assert.match(absent.output, /role auth\/kubernetes\/role\/eso-obs: absent/);
+  assert.notEqual(bao.as("root", "read", ESO_ROLE)[0], 0, "the apply created the role");
 });

@@ -194,9 +194,9 @@ export function comparePolicy(name: string, declared: Grants, read: Grants): str
   return drift;
 }
 
-/** Run `bao`; stdout on success, undefined when OpenBao says the object does not exist. */
-export function bao(args: string[], notFound: RegExp): string | undefined {
-  const r = spawnSync("bao", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+/** Run `bao` (with `input` on stdin, if given); stdout on success, undefined when OpenBao says the object does not exist. */
+export function bao(args: string[], notFound: RegExp, input?: string): string | undefined {
+  const r = spawnSync("bao", args, { encoding: "utf8", ...(input === undefined ? { stdio: ["ignore", "pipe", "pipe"] } : { input }) });
   if (r.error) throw new ReadError(`cannot run bao: ${r.error.message}`);
   if (r.status === 0) return r.stdout;
   const err = `${r.stderr ?? ""}${r.stdout ?? ""}`.trim();

@@ -15,16 +15,22 @@
 //     whose effective permissions grant `id-token: write`;
 //   - `run:` steps written to a file and run with `bash -e <file>` from the
 //     workspace, stopping the job at the first failing step;
-//   - `uses:` steps through explicit handlers (checkout and setup-node are
-//     no-ops: the workspace is already the checkout and node is on PATH); an
-//     unknown action or an unsupported expression is an error, never skipped.
+//   - `uses:` steps through explicit handlers: checkout is a no-op (the
+//     workspace is already the checkout) and setup-node puts this process's
+//     node first on PATH for the job's later steps; an unknown action or an
+//     unsupported expression is an error, never skipped;
+//   - the tool images: a GitHub-hosted job (ubuntu-latest) has node
+//     preinstalled, but a `self-hosted` job runs on the estate runner image,
+//     which has none, so there `node` is "command not found" (exit 127) until
+//     a setup-node step installs it (red main 44693705144..44824828516: every
+//     publish since CR-PUBLISH-OIDC died with `node: command not found`).
 //
 // The workflows are read with the repository's dependency-free YAML reader
 // (tests/deploy/render.ts; docs/EXTERNAL-REVIEW.md §3). External commands
 // (docker, npm, ...) are whatever the caller puts first on PATH.
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseYamlDocs, type Yaml } from "../deploy/render.ts";
@@ -200,7 +206,36 @@ async function runScript(script: string, cwd: string, env: Record<string, string
   return [status, output];
 }
 
-const NOOP_ACTIONS = new Set(["actions/checkout", "actions/setup-node"]);
+const NOOP_ACTIONS = new Set(["actions/checkout"]);
+const SETUP_NODE = "actions/setup-node";
+
+/** Whether `runs-on` selects a self-hosted runner (a "self-hosted" label). */
+export function isSelfHosted(runsOn: Yaml | undefined): boolean {
+  const labels = Array.isArray(runsOn) ? runsOn.map(String) : runsOn === undefined || runsOn === null ? [] : [String(runsOn)];
+  return labels.includes("self-hosted");
+}
+
+/** A directory whose `node` behaves like a runner image without node: bash's "command not found", exit 127. */
+function nodeAbsent(tmp: string): string {
+  const dir = join(tmp, "no-node");
+  mkdirSync(dir);
+  writeFileSync(join(dir, "node"), '#!/bin/bash\necho "node: command not found" >&2\nexit 127\n', { mode: 0o755 });
+  return dir;
+}
+
+/**
+ * What setup-node adds to PATH, as far as these workflows use it: this
+ * process's node, alone in its own directory, so the caller's stand-ins
+ * (npm, docker, ...) still come first for everything else.
+ */
+function nodeInstalled(tmp: string): string {
+  const dir = join(tmp, "setup-node");
+  if (!existsSync(dir)) {
+    mkdirSync(dir);
+    symlinkSync(process.execPath, join(dir, "node"));
+  }
+  return dir;
+}
 
 /** Run every job of every workflow the event triggers; returns each job's outcome (skipped jobs included). */
 export async function runEvent(opts: RunnerOptions): Promise<JobRun[]> {
@@ -280,6 +315,7 @@ async function runJob(
       ...envOf(workflow.env, ctx),
       ...envOf(job.env, ctx),
     };
+    if (isSelfHosted(job["runs-on"])) base.PATH = `${nodeAbsent(tmp)}:${base.PATH ?? ""}`;
     run.status = "success";
     const steps = Array.isArray(job.steps) ? job.steps : [];
     for (const [i, step] of steps.entries()) {
@@ -292,7 +328,8 @@ async function runJob(
       }
       if (step.uses !== undefined) {
         const action = String(step.uses).replace(/@.*$/, "");
-        if (!NOOP_ACTIONS.has(action)) throw new Error(`${file}: ${id} uses ${action}, which this runner does not emulate`);
+        if (action === SETUP_NODE) base.PATH = `${nodeInstalled(tmp)}:${base.PATH ?? ""}`;
+        else if (!NOOP_ACTIONS.has(action)) throw new Error(`${file}: ${id} uses ${action}, which this runner does not emulate`);
         run.steps.push({ name, status: "success", output: "" });
         continue;
       }

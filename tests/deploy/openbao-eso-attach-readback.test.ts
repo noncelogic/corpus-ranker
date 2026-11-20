@@ -31,8 +31,8 @@ const ATTACHED = attach.add_token_policies.map((p) => p.name);
 const declared = new Map(attach.add_token_policies.map((p) => [p.name, readFileSync(resolve(repoRoot, p.file), "utf8")]));
 const MINIO = "external-secrets-corpus-ranker-minio";
 const KEYS = "external-secrets-corpus-ranker";
-/** A policy the role carries that this product does not declare: the estate's GHCR pull grant, or any other. */
-const OTHER = "external-secrets-ghcr-pull";
+/** A policy the role carries that this product does not declare (the estate's own grants, such as its ACR pull grant). */
+const OTHER = "external-secrets-estate-other";
 
 /** What OpenBao 2.4 returns for a Kubernetes auth role read. */
 function roleRead(tokenPolicies: string[], overrides: Record<string, unknown> = {}): string {

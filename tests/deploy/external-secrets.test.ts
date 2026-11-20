@@ -13,10 +13,8 @@
 // which never prints them (tests/deploy/api-keys-job.test.ts).
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync, spawnSync } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { renderObjects, repoRoot, type K8sObject } from "./render.ts";
 import { docker, policyPaths, startDevOpenBao } from "./openbao-dev.ts";
 
@@ -210,7 +208,7 @@ const generatorSource = (spec: Record<string, any>): void => {
   delete spec.data;
   spec.dataFrom = [{ sourceRef: { generatorRef: { ...DB_GENERATOR } } }];
 };
-const NON_DB_EXTERNAL_SECRETS = ["ranker-minio-service", "ranker-api-keys", "ranker-ghcr-pull"];
+const NON_DB_EXTERNAL_SECRETS = ["ranker-minio-service", "ranker-api-keys", "ranker-registry-pull"];
 
 test("every non-database secret environment variable the rendered ranker Deployment reads is sourced from an ExternalSecret under kv/corpus-ranker, and RANKER_DATABASE_URL only from the non-refreshing Password generator", () => {
   const rendered = renderObjects();
@@ -269,73 +267,21 @@ test("every non-database secret environment variable the rendered ranker Deploym
   );
 });
 
-// CR-D1-PULL-D2 acceptance: the ranker's own pull-only GHCR credential
-// (registry-credential-per-product; Rule: policies/placement-defaults.yaml#credentials)
-// lives at kv/corpus-ranker/ghcr-pull, written by the DevOps route with
-// deploy/openbao/store-ghcr-pull.sh (never echoed, presence checked by name
-// only), and the estate External Secrets role reads that one exact path,
-// read-only, through deploy/openbao/external-secrets-ghcr-pull.hcl.
-test("the ranker's image pull secret is an ExternalSecret sourced from kv/corpus-ranker/ghcr-pull", (t) => {
+// CR-IMAGE-ACR (INTENTS I21; Rule: policies/placement-defaults.yaml#credentials):
+// the ranker's own pull-only ACR token corpus-ranker-pull is custodied
+// estate-side at kv/corpus-ranker/acr-pull, which the estate External Secrets
+// role may read (meta-harness devops/aks/corpus-ranker-argo/README.md). The
+// API's image pull secret is synced from that one path and nothing else.
+test("the ranker's image pull secret is an ExternalSecret sourced from kv/corpus-ranker/acr-pull", () => {
   const objs = renderObjects();
   const api = find(objs, "Deployment", "ranker-api");
   const pullSecrets = ((api.spec.template.spec.imagePullSecrets ?? []) as Array<{ name: string }>).map((s) => s.name);
-  assert.deepEqual(pullSecrets, ["ranker-ghcr-pull"], "the API pulls with the ranker's own pull secret only");
-  const es = externalSecretFor(objs, "ranker-ghcr-pull");
+  assert.deepEqual(pullSecrets, ["ranker-registry-pull"], "the API pulls with the ranker's own pull secret only");
+  const es = externalSecretFor(objs, "ranker-registry-pull");
   assertFromOpenBao(es);
   assert.equal(es.spec.target.template?.type, "kubernetes.io/dockerconfigjson");
   const keys = new Set((es.spec.data as Array<{ remoteRef: { key: string } }>).map((d) => d.remoteRef.key));
-  assert.deepEqual([...keys], ["corpus-ranker/ghcr-pull"], "the pull secret reads kv/corpus-ranker/ghcr-pull and nothing else");
-
-  // The estate External Secrets role: one exact path, read-only, no wildcard, no metadata.
-  const policy = readFileSync(resolve(repoRoot, "deploy", "openbao", "external-secrets-ghcr-pull.hcl"), "utf8").replace(/#.*$/gm, "");
-  const stanzas = [...policy.matchAll(/path\s+"([^"]+)"\s*\{\s*capabilities\s*=\s*\[([^\]]*)\]\s*\}/g)].map((m) => ({
-    path: m[1],
-    caps: m[2]!.split(",").map((c) => c.trim().replace(/"/g, "")).filter(Boolean),
-  }));
-  assert.deepEqual(stanzas, [{ path: "kv/data/corpus-ranker/ghcr-pull", caps: ["read"] }], "the ESO role reads exactly kv/corpus-ranker/ghcr-pull, read-only");
-  assert.equal((policy.match(/\bpath\b/g) ?? []).length, 1, "the policy grants no other path");
-  assert.doesNotMatch(policy, /[*+]/, "no wildcard grants");
-
-  // The DevOps route stores it: token from stdin, never echoed, never overwriting.
-  const script = resolve(repoRoot, "deploy", "openbao", "store-ghcr-pull.sh");
-  const bin = mkdtempSync(join(tmpdir(), "fake-bao-"));
-  t.after(() => rmSync(bin, { recursive: true, force: true }));
-  // A stand-in `bao` logging each call; `kv metadata get` succeeds unless FAKE_BAO_ABSENT is set.
-  writeFileSync(
-    join(bin, "bao"),
-    `#!/bin/sh\necho "$*" >> "${bin}/calls"\ncase "$2" in put) cat > "${bin}/stdin" ;; esac\necho "== Secret Path ==" ; echo "kv/data/corpus-ranker/ghcr-pull"\nif [ "$2" = metadata ] && [ -n "\${FAKE_BAO_ABSENT:-}" ]; then exit 2; fi\nexit "\${FAKE_BAO_EXIT:-0}"\n`,
-  );
-  chmodSync(join(bin, "bao"), 0o755);
-  const env = { ...process.env, PATH: `${bin}:${process.env.PATH}` };
-  const token = "ghp_" + "Z".repeat(36);
-
-  const run = spawnSync(script, ["store", "noncelogic-ranker-pull"], { env, input: `${token}\n`, encoding: "utf8" });
-  assert.equal(run.status, 0, run.stderr);
-  const calls = readFileSync(join(bin, "calls"), "utf8").trim().split("\n");
-  assert.deepEqual(calls, ["kv put -mount=kv -cas=0 corpus-ranker/ghcr-pull -", "kv metadata get -mount=kv corpus-ranker/ghcr-pull"]);
-  assert.deepEqual(JSON.parse(readFileSync(join(bin, "stdin"), "utf8")), { username: "noncelogic-ranker-pull", token });
-  assert.ok(!run.stdout.includes(token) && !run.stderr.includes(token), "the script echoed the token");
-  assert.ok(!calls.join(" ").includes(token), "the token went on argv");
-  assert.doesNotMatch(run.stdout + run.stderr, /Secret Path/, "the bao CLI's output is not passed through");
-  assert.match(run.stderr, /present: kv\/corpus-ranker\/ghcr-pull/);
-
-  // Presence is checked by name (metadata) only, never by reading the value.
-  rmSync(join(bin, "calls"));
-  const check = spawnSync(script, ["check"], { env, encoding: "utf8" });
-  assert.equal(check.status, 0, check.stderr);
-  assert.deepEqual(readFileSync(join(bin, "calls"), "utf8").trim().split("\n"), ["kv metadata get -mount=kv corpus-ranker/ghcr-pull"]);
-  assert.notEqual(spawnSync(script, ["check"], { env: { ...env, FAKE_BAO_ABSENT: "1" }, encoding: "utf8" }).status, 0, "an absent credential must fail the check");
-
-  // Refusals: no/odd user, empty or malformed token, a failed write.
-  for (const [args, input] of [[["store"], `${token}\n`], [["store", "Bad User"], `${token}\n`], [["store", "u"], ""], [["store", "u"], "not a token\n"], [["bogus"], ""]] as const) {
-    assert.notEqual(spawnSync(script, [...args], { env, input, encoding: "utf8" }).status, 0, `accepted ${JSON.stringify(args)}`);
-  }
-  assert.notEqual(spawnSync(script, ["store", "u"], { env: { ...env, FAKE_BAO_EXIT: "2" }, input: `${token}\n`, encoding: "utf8" }).status, 0);
-
-  const text = readFileSync(script, "utf8");
-  assert.match(text, /^#!\/bin\/sh\n/);
-  assert.doesNotMatch(text, /set -[a-z]*x|set -o xtrace/);
-  execFileSync("sh", ["-n", script]);
+  assert.deepEqual([...keys], ["corpus-ranker/acr-pull"], "the pull secret reads kv/corpus-ranker/acr-pull and nothing else");
 });
 
 // CR-D1-SECRETS-ROLLOUT / CR-M3-D2d acceptance (CRANK-140; Rule: policies/placement-defaults.yaml#estate
@@ -382,7 +328,7 @@ async function assertSinglePathPolicy(t: TestContext, policyName: string, path: 
   bao.root("policy", "write", policyName, "/tmp/policy.hcl");
   bao.root("kv", "put", "-mount=kv", "corpus-ranker/api-keys", "joe=api-secret");
   bao.root("kv", "put", "-mount=kv", "corpus-ranker/minio", "root-user=r", "root-password=p", "service-user=s", "service-password=q");
-  bao.root("kv", "put", "-mount=kv", "corpus-ranker/ghcr-pull", "username=u", "token=t");
+  bao.root("kv", "put", "-mount=kv", "corpus-ranker/acr-pull", "username=u", "password=p");
   bao.root("kv", "put", "-mount=kv", "other-product/api-keys", "x=y");
   const before = bao.root("kv", "get", "-format=json", "-mount=kv", path);
   const token = JSON.parse(bao.root("token", "create", "-format=json", `-policy=${policyName}`)).auth.client_token as string;
@@ -399,7 +345,7 @@ async function assertSinglePathPolicy(t: TestContext, policyName: string, path: 
     ["kv", "list", "-mount=kv", "corpus-ranker"],
     ["kv", "metadata", "get", "-mount=kv", path],
     ["kv", "metadata", "get", "-mount=kv", other],
-    ["kv", "get", "-mount=kv", "corpus-ranker/ghcr-pull"],
+    ["kv", "get", "-mount=kv", "corpus-ranker/acr-pull"],
     ["kv", "get", "-mount=kv", `${path}-old`],
     ["kv", "get", "-mount=kv", "other-product/api-keys"],
     ["policy", "list"],

@@ -4,6 +4,9 @@
 // is checked against that version by the kernel's rules (dimensions, scales,
 // allowed scorers). Score events are append-only: scoring an Item again is a
 // new event, and a correction is a retraction, never an update.
+// A score made before it is recorded here (SPEC A7 Phase 0 import) carries
+// its own `scored_at`, which is stored as given; it may not lie in the
+// future. Without one, the score is dated when it is recorded.
 import { randomUUID } from "node:crypto";
 import { loadContracts, openapiUri, type SchemaRegistry } from "../contracts/index.ts";
 import type { Queryable } from "../db/client.ts";
@@ -39,7 +42,11 @@ export async function score(rawBody: string, deps: ScoreDeps): Promise<ApiRespon
     .validate(body, SCORE_REQUEST())
     .map((e) => `${e.instancePath || "/"} ${e.message}`);
   if (problems.length > 0) return error(400, "invalid_request", problems.join("; "));
-  const req = body as ScoreInput;
+  const req = body as ScoreInput & { scored_at?: string };
+  const recordedAt = deps.now();
+  if (req.scored_at !== undefined && Date.parse(req.scored_at) > recordedAt.getTime()) {
+    return error(400, "invalid_request", `/scored_at ${req.scored_at} is in the future`);
+  }
 
   // $1 policy id, $2 policy version, $3 item id.
   const [row] = await deps.db.query<{ found: { policy: CitedPolicy | null; policy_exists: boolean; item_exists: boolean } }>(
@@ -81,7 +88,7 @@ export async function score(rawBody: string, deps: ScoreDeps): Promise<ApiRespon
       checked.policy_version,
       JSON.stringify(checked.dimension_scores),
       JSON.stringify(checked.scorer),
-      deps.now().toISOString(),
+      req.scored_at ?? recordedAt.toISOString(),
       checked.source_blind,
     ],
   );

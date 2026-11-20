@@ -51,7 +51,8 @@ export function pick(obj: Record<string, unknown>, keys: string[]): unknown {
   return undefined;
 }
 
-function readScorer(rec: Record<string, unknown>): Scorer | string {
+/** The record's scorer, kept as the file names it; a message when it has none. */
+export function readScorer(rec: Record<string, unknown>): Scorer | string {
   const raw = rec.scorer ?? rec.scored_by;
   let scorer: Scorer;
   if (typeof raw === "string" && raw.trim() !== "") scorer = { identity: raw.trim() };
@@ -64,13 +65,44 @@ function readScorer(rec: Record<string, unknown>): Scorer | string {
   return scorer;
 }
 
-function readScoredAt(rec: Record<string, unknown>): string | { error: string } {
+/** The record's scoring date as an ISO 8601 timestamp (a bare date is 00:00 UTC). */
+export function readScoredAt(rec: Record<string, unknown>): string | { error: string } {
   const raw = rec.scored_at;
   if (typeof raw !== "string" || raw.trim() === "") return { error: "scores have no scored_at date" };
   const s = raw.trim();
   const ts = DATE_ONLY.test(s) ? `${s}T00:00:00Z` : s;
   if (!DATE_TIME.test(ts) || Number.isNaN(Date.parse(ts))) return { error: `scored_at ${JSON.stringify(raw)} is not a date` };
   return ts;
+}
+
+/**
+ * The paper-rubric v1 dimension scores in a record's `scores` (with its
+ * `reasons`), each citing `evidence`; a message when a value is not a number.
+ * A missing reason is stated as missing, quoting `where` (file and line).
+ */
+export function readDimensionScores(
+  scores: Record<string, unknown>,
+  reasons: Record<string, unknown>,
+  evidence: DimensionScore["evidence"],
+  where: string,
+): DimensionScore[] | string {
+  const out: DimensionScore[] = [];
+  for (const [dimension, keys] of DIMENSION_KEYS) {
+    const value = pick(scores, keys);
+    if (value === undefined || value === null) continue;
+    if (typeof value !== "number") return `${dimension} score ${JSON.stringify(value)} is not a number`;
+    const reason = pick(reasons, keys);
+    out.push({
+      dimension,
+      value,
+      reason:
+        typeof reason === "string" && reason.trim() !== ""
+          ? reason
+          : `Historical score imported from ${where}; no reason recorded.`,
+      evidence: structuredClone(evidence),
+    });
+  }
+  return out;
 }
 
 /**
@@ -126,22 +158,8 @@ export function importScoresJsonl(
     const original = store.originalByHash(opts.corpusId, captureHash);
     const evidence = original === undefined ? [] : [{ id: original.id }];
 
-    const dimensionScores: DimensionScore[] = [];
-    for (const [dimension, keys] of DIMENSION_KEYS) {
-      const value = pick(scores, keys);
-      if (value === undefined || value === null) continue;
-      if (typeof value !== "number") return fail(`${dimension} score ${JSON.stringify(value)} is not a number`);
-      const reason = pick(reasons, keys);
-      dimensionScores.push({
-        dimension,
-        value,
-        reason:
-          typeof reason === "string" && reason.trim() !== ""
-            ? reason
-            : `Historical score imported from ${opts.source} line ${lineNo}; no reason recorded.`,
-        evidence: structuredClone(evidence),
-      });
-    }
+    const dimensionScores = readDimensionScores(scores, reasons, evidence, `${opts.source} line ${lineNo}`);
+    if (typeof dimensionScores === "string") return fail(dimensionScores);
     if (dimensionScores.length === 0) return fail("scores name no paper-rubric dimension");
 
     const id = shortId("cr_score_", opts.corpusId, policyId, String(policyVersion), captureHash);

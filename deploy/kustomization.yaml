@@ -1,10 +1,16 @@
 # Corpus Ranker on aks-obs-01 (TECH-STACK §10): one namespace, the ranker's
 # own CNPG Postgres cluster (pgvector) with its migration Job, MinIO with
-# the Job provisioning its bucket and writer, the API, and ExternalSecrets: API keys and MinIO credentials
+# the Job provisioning its bucket and writer, the API (an Argo Rollouts
+# blue/green Rollout), and ExternalSecrets: API keys and MinIO credentials
 # from the estate OpenBao ClusterSecretStore, database passwords generated in-cluster.
 #
-# Manifests only. No CI step applies these; rollout is estate-side GitOps
-# (Argo). Render locally with:  kustomize build deploy/
+# Manifests only. No CI step applies these; rollout is estate-side GitOps:
+# the Argo CD Application in argocd/application.yaml tracks this overlay on
+# aks-obs-01. Render locally with:  kustomize build deploy/
+#
+# Namespaces are explicit on every resource (corpus-ranker; the Application
+# in argocd), not set by a kustomize `namespace:` field, which would also
+# move the Application out of Argo CD's namespace.
 # No Ingress: the API is reachable estate-internally via its ClusterIP Service.
 #
 # Argo CD sync waves (argocd.argoproj.io/sync-wave) order one full sync of an
@@ -21,17 +27,19 @@
 #      (api-keys-job.yaml: the key set, when kv/corpus-ranker/api-keys is empty)
 #   7  the ExternalSecrets syncing what they wrote (ranker-minio-service,
 #      ranker-api-keys)
-#   8  the API
+#   8  the API: its active and preview Services and its blue/green Rollout,
+#      which promotes a revision only once its readiness probe (/readyz: the
+#      database and the object store answer) passes
 # then, after every wave is synced and healthy, the PostSync hook Job
 # ranker-db-check (dbcheck-job.yaml) logs in with each generated database
 # role secret and fails the sync if a secret is missing or a login is refused.
 # tests/deploy/sync-waves.test.ts holds every reference to this order.
+# The Application itself (argocd/application.yaml) is wave 0.
 # The API (wave 8) starts only after every ExternalSecret it reads reports
 # Ready (Argo CD's ExternalSecret health check gates each wave), so it never
 # boots without its secrets; tests/deploy/sync-order.test.ts holds that.
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
-namespace: corpus-ranker
 labels:
   - pairs:
       app.kubernetes.io/part-of: corpus-ranker
@@ -46,6 +54,7 @@ resources:
   - api-keys-job.yaml
   - api.yaml
   - dbcheck-job.yaml
+  - argocd/application.yaml
 # CNPG bootstrap SQL and the migration script, kept as plain files so the
 # schema tests run exactly what deploys. Fixed names: the Cluster refers to
 # its ConfigMap from a CRD field kustomize cannot rewrite.
@@ -53,6 +62,7 @@ configMapGenerator:
   - name: ranker-db-bootstrap
     files:
       - db/bootstrap.sql
+    namespace: corpus-ranker
     options:
       disableNameSuffixHash: true
       annotations:
@@ -60,6 +70,7 @@ configMapGenerator:
   - name: ranker-db-migrate
     files:
       - db/migrate.sh
+    namespace: corpus-ranker
     options:
       disableNameSuffixHash: true
       annotations:
@@ -67,6 +78,7 @@ configMapGenerator:
   - name: ranker-db-check
     files:
       - db/dbcheck.sh
+    namespace: corpus-ranker
     options:
       disableNameSuffixHash: true
       annotations:
@@ -76,6 +88,7 @@ configMapGenerator:
     files:
       - minio/provision.sh
       - minio/writer-policy.json
+    namespace: corpus-ranker
     options:
       disableNameSuffixHash: true
       annotations:
@@ -84,6 +97,7 @@ configMapGenerator:
   - name: ranker-api-keys-generate
     files:
       - api-keys/generate.sh
+    namespace: corpus-ranker
     options:
       disableNameSuffixHash: true
       annotations:

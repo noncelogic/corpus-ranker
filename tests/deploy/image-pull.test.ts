@@ -4,7 +4,7 @@
 // syncs from OpenBao, so the estate can fetch the private ranker image.
 //
 // A "ranker workload" is any pod-bearing object whose pod template runs the
-// ranker image (in a container or an init container). The API Deployment
+// ranker image (in a container or an init container). The API Rollout
 // and the migration Job must be among them.
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -28,6 +28,7 @@ interface Container {
 function podSpec(o: K8sObject): Record<string, any> | undefined {
   switch (o.kind) {
     case "Deployment":
+    case "Rollout":
     case "StatefulSet":
     case "DaemonSet":
     case "ReplicaSet":
@@ -58,7 +59,7 @@ test("every rendered ranker workload references the noncelogicci.azurecr.io/corp
     return spec !== undefined && imagesOf(spec).some(isRankerImage);
   });
   const ids = workloads.map((o) => `${o.kind}/${o.metadata.name}`);
-  for (const expected of ["Deployment/ranker-api", "Job/ranker-db-migrate"]) {
+  for (const expected of ["Rollout/ranker-api", "Job/ranker-db-migrate"]) {
     assert.ok(ids.includes(expected), `${expected} must run the ranker image ${RANKER_IMAGE}; ranker workloads: ${JSON.stringify(ids)}`);
   }
 
@@ -135,10 +136,10 @@ function renderDockerConfig(template: string, values: Record<string, string>): u
 // pull-only ACR token corpus-ranker-pull, custodied at kv/corpus-ranker/acr-pull
 // and readable by the estate External Secrets role. The GHCR pull secret,
 // its store script and its OpenBao policy are gone.
-test("the API Deployment and the migration Job pull noncelogicci.azurecr.io/corpus-ranker with ranker-registry-pull from kv/corpus-ranker/acr-pull", () => {
+test("the API Rollout and the migration Job pull noncelogicci.azurecr.io/corpus-ranker with ranker-registry-pull from kv/corpus-ranker/acr-pull", () => {
   const objects = renderObjects();
 
-  for (const [kind, name] of [["Deployment", "ranker-api"], ["Job", "ranker-db-migrate"]] as const) {
+  for (const [kind, name] of [["Rollout", "ranker-api"], ["Job", "ranker-db-migrate"]] as const) {
     const w = objects.find((o) => o.kind === kind && o.metadata.name === name);
     assert.ok(w, `${kind}/${name} is not rendered`);
     const spec = podSpec(w)!;

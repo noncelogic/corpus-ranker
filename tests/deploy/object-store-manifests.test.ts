@@ -149,7 +149,7 @@ test("the Job publishes the service user's credentials to OpenBao at kv/corpus-r
   assert.ok(env.BAO_K8S_AUTH_ROLE, "no OpenBao Kubernetes auth role set");
 
   // The ExternalSecret the API reads its S3 credentials from.
-  const api = findObject("Deployment", "ranker-api");
+  const api = findObject("Rollout", "ranker-api");
   const refs = secretRefsOf(api.spec.template.spec.containers[0]);
   const keyId = refs.RANKER_S3_ACCESS_KEY_ID;
   const secret = refs.RANKER_S3_SECRET_ACCESS_KEY;

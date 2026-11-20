@@ -1,8 +1,10 @@
-// Ranker service: an HTTP server exposing a health endpoint and the REST API
+// Ranker service: an HTTP server exposing liveness (/healthz) and readiness
+// (/readyz) endpoints and the REST API
 // of the frozen contract (contracts/openapi.json, TECH-STACK §1), as it grows.
 import { createServer as createHttpServer, type IncomingMessage, type Server } from "node:http";
 import { fileURLToPath } from "node:url";
 import { capture, type ApiResponse } from "./api/capture.ts";
+import { DEFAULT_READINESS_TIMEOUT_MS, readiness } from "./api/readiness.ts";
 import { score } from "./api/score.ts";
 import { topN } from "./api/top-n.ts";
 import { BootConfigError, loadConfig, loadServiceConfig, type RankerConfig } from "./config.ts";
@@ -18,6 +20,8 @@ export interface ServerDeps {
   now?: () => Date;
   /** Store for captured bytes (default: the S3-compatible store in config.objectStore). */
   store?: ObjectStore;
+  /** Bound on each readiness check of GET /readyz (default DEFAULT_READINESS_TIMEOUT_MS). */
+  readinessTimeoutMs?: number;
 }
 
 const ORIGINALS = /^\/v1\/corpora\/([^/?#]+)\/originals$/;
@@ -39,7 +43,12 @@ export function createServer(config: RankerConfig, deps: ServerDeps = {}): Serve
 
   const route = async (req: IncomingMessage): Promise<ApiResponse> => {
     const path = new URL(req.url ?? "/", "http://ranker").pathname;
+    // Liveness: the process answers. Independent of the database and object store.
     if (req.method === "GET" && path === "/healthz") return { status: 200, body: { status: "ok", service: "ranker" } };
+    // Readiness: both the database and the object store answer (src/api/readiness.ts).
+    if (req.method === "GET" && path === "/readyz") {
+      return readiness({ db, store, timeoutMs: deps.readinessTimeoutMs ?? DEFAULT_READINESS_TIMEOUT_MS });
+    }
     const originals = ORIGINALS.exec(path);
     if (originals && req.method === "POST") {
       let corpusId: string;

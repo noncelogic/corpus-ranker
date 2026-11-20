@@ -18,6 +18,7 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   name: ranker-db-migrate
+  namespace: corpus-ranker
   annotations:
     argocd.argoproj.io/hook: Sync
     argocd.argoproj.io/sync-wave: "4"

@@ -5,7 +5,7 @@
 //   node deploy/acr/check-image-pull.ts
 //
 // It reads, through kubectl, the corpus-ranker Argo CD Application (namespace
-// argocd) and the pods of the API Deployment (ranker-api) and of the migration
+// argocd) and the pods of the API Rollout (ranker-api) and of the migration
 // Job (ranker-db-migrate) in namespace corpus-ranker, selected by their pod
 // template label app.kubernetes.io/name, and checks:
 //
@@ -45,7 +45,7 @@ const APP = { name: "corpus-ranker", namespace: "argocd" };
 const NAMESPACE = "corpus-ranker";
 /** Each checked workload: its pods' label value and the container that runs the ranker image. */
 const WORKLOADS = [
-  { id: "Deployment/ranker-api", label: "ranker-api", container: { name: "api", init: false } },
+  { id: "Rollout/ranker-api", label: "ranker-api", container: { name: "api", init: false } },
   { id: "Job/ranker-db-migrate", label: "ranker-db-migrate", container: { name: "migrations", init: true } },
 ] as const;
 

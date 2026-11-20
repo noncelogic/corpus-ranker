@@ -20,6 +20,8 @@ Requirements: Node.js 24+, Docker with the Compose plugin.
 npm ci                 # install (TypeScript toolchain only)
 npm run build          # compile the ranker service skeleton to dist/
 npm start              # run it; GET /healthz answers {"status":"ok","service":"ranker"}
+                       # (liveness); GET /readyz answers 200 only while the database and
+                       # the object store both answer, else 503 (readiness)
                        # it refuses to start without RANKER_API_KEYS_DIR (one file per
                        # principal holding its API key) and RANKER_S3_ACCESS_KEY_ID /
                        # RANKER_S3_SECRET_ACCESS_KEY

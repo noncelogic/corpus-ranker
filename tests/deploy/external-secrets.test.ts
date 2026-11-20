@@ -1,4 +1,4 @@
-// CR-D1-SECRETS / CR-D1-SECRETS-OVERLAY / CR-D1-SECRETS-WIRE acceptance: every secret the rendered ranker API Deployment
+// CR-D1-SECRETS / CR-D1-SECRETS-OVERLAY / CR-D1-SECRETS-WIRE acceptance: every secret the rendered ranker API Rollout
 // reads at boot (secret-backed env vars, envFrom Secrets, secret volumes and
 // its image pull Secret) is materialised by an ExternalSecret that reads the
 // estate OpenBao through the ClusterSecretStore `openbao`, from paths under
@@ -102,7 +102,7 @@ function assertProducesKey(es: K8sObject, key: string): void {
   else if (!extracts) assert.ok(dataKeys.includes(key), `ExternalSecret/${es.metadata.name} produces no key ${key}`);
 }
 
-/** One Secret the rendered ranker API Deployment reads, and what reads it. */
+/** One Secret the rendered ranker API Rollout reads, and what reads it. */
 interface SecretRead {
   /** `env NAME`, `envFrom <container>`, `volume <name>` or `imagePullSecret`. */
   consumer: string;
@@ -113,9 +113,9 @@ interface SecretRead {
 
 const DB_URL_READ = `env ${GENERATED_ENV}`;
 
-/** Every Secret the rendered ranker-api Deployment reads at boot, after checking nothing secret bypasses a Secret. */
+/** Every Secret the rendered ranker-api Rollout reads at boot, after checking nothing secret bypasses a Secret. */
 function bootSecretReads(objs: K8sObject[]): SecretRead[] {
-  const deployment = find(objs, "Deployment", "ranker-api");
+  const deployment = find(objs, "Rollout", "ranker-api");
   const podSpec = deployment.spec.template.spec;
   const reads: SecretRead[] = [];
   let mountsApiKeys = false;
@@ -147,7 +147,7 @@ function bootSecretReads(objs: K8sObject[]): SecretRead[] {
       mountsApiKeys = true;
     }
   }
-  assert.ok(mountsApiKeys, "the Deployment must set RANKER_API_KEYS_DIR to its mounted API key Secret");
+  assert.ok(mountsApiKeys, "the Rollout must set RANKER_API_KEYS_DIR to its mounted API key Secret");
 
   for (const volume of podSpec.volumes ?? []) {
     const names: string[] = [
@@ -159,7 +159,7 @@ function bootSecretReads(objs: K8sObject[]): SecretRead[] {
   }
   for (const pull of podSpec.imagePullSecrets ?? []) reads.push({ consumer: "imagePullSecret", secret: pull.name });
 
-  for (const name of BOOT_SECRET_ENV) assert.ok(reads.some((r) => r.consumer === `env ${name}`), `the Deployment must read ${name} from a Secret`);
+  for (const name of BOOT_SECRET_ENV) assert.ok(reads.some((r) => r.consumer === `env ${name}`), `the Rollout must read ${name} from a Secret`);
   // Nothing secret is rendered from git.
   for (const o of objs) assert.notEqual(o.kind, "Secret", `Secret/${o.metadata.name} is rendered from git`);
   return reads;
@@ -210,7 +210,7 @@ const generatorSource = (spec: Record<string, any>): void => {
 };
 const NON_DB_EXTERNAL_SECRETS = ["ranker-minio-service", "ranker-api-keys", "ranker-registry-pull"];
 
-test("every non-database secret environment variable the rendered ranker Deployment reads is sourced from an ExternalSecret under kv/corpus-ranker, and RANKER_DATABASE_URL only from the non-refreshing Password generator", () => {
+test("every non-database secret environment variable the rendered ranker API Rollout reads is sourced from an ExternalSecret under kv/corpus-ranker, and RANKER_DATABASE_URL only from the non-refreshing Password generator", () => {
   const rendered = renderObjects();
   // Allowed: every other secret from kv/corpus-ranker, and RANKER_DATABASE_URL from the Password generator.
   assertNonDatabaseSecretsFromOpenBao(rendered);
@@ -232,7 +232,7 @@ test("every non-database secret environment variable the rendered ranker Deploym
   assert.throws(
     () =>
       assertNonDatabaseSecretsFromOpenBao(
-        withEdit("Deployment", "ranker-api", (s) => {
+        withEdit("Rollout", "ranker-api", (s) => {
           const env = s.template.spec.containers[0].env.find((e: EnvVar) => e.name === "RANKER_S3_SECRET_ACCESS_KEY");
           env.valueFrom.secretKeyRef = { name: "ranker-db-service", key: "password" };
         }),
@@ -243,7 +243,7 @@ test("every non-database secret environment variable the rendered ranker Deploym
   assert.throws(
     () =>
       assertNonDatabaseSecretsFromOpenBao(
-        withEdit("Deployment", "ranker-api", (s) => s.template.spec.containers[0].env.push({ name: "RANKER_EXTRA_TOKEN", value: "x" })),
+        withEdit("Rollout", "ranker-api", (s) => s.template.spec.containers[0].env.push({ name: "RANKER_EXTRA_TOKEN", value: "x" })),
       ),
     /looks secret/,
   );
@@ -274,7 +274,7 @@ test("every non-database secret environment variable the rendered ranker Deploym
 // API's image pull secret is synced from that one path and nothing else.
 test("the ranker's image pull secret is an ExternalSecret sourced from kv/corpus-ranker/acr-pull", () => {
   const objs = renderObjects();
-  const api = find(objs, "Deployment", "ranker-api");
+  const api = find(objs, "Rollout", "ranker-api");
   const pullSecrets = ((api.spec.template.spec.imagePullSecrets ?? []) as Array<{ name: string }>).map((s) => s.name);
   assert.deepEqual(pullSecrets, ["ranker-registry-pull"], "the API pulls with the ranker's own pull secret only");
   const es = externalSecretFor(objs, "ranker-registry-pull");

@@ -1,5 +1,5 @@
 // CR-D1 acceptance: `kustomize build deploy/` renders, and the API
-// Deployment's env names match the frozen config contract read by
+// Rollout's env names match the frozen config contract read by
 // src/config.ts (RANKER_PORT, RANKER_DATABASE_URL, RANKER_S3_ENDPOINT,
 // RANKER_S3_BUCKET).
 //
@@ -104,24 +104,24 @@ const find = (kind: string, name: string): Doc => {
   return doc;
 };
 
-test("kustomize build renders and the Deployment env names match the frozen config contract (RANKER_PORT, RANKER_DATABASE_URL, RANKER_S3_ENDPOINT, RANKER_S3_BUCKET)", () => {
+test("kustomize build renders and the API Rollout env names match the frozen config contract (RANKER_PORT, RANKER_DATABASE_URL, RANKER_S3_ENDPOINT, RANKER_S3_BUCKET)", () => {
   const docs = renderDocs();
   assert.ok(docs.length > 0, "kustomize build rendered nothing");
 
-  const deployment = find("Deployment", "ranker-api");
+  const deployment = find("Rollout", "ranker-api");
   const names = envNames(deployment.text);
   for (const name of CONTRACT) {
-    assert.ok(names.includes(name), `Deployment env lacks ${name}; has ${JSON.stringify(names)}`);
+    assert.ok(names.includes(name), `Rollout env lacks ${name}; has ${JSON.stringify(names)}`);
   }
   assert.equal(new Set(names).size, names.length, `duplicate env names: ${JSON.stringify(names)}`);
 
-  // Every RANKER_* name the Deployment sets must be one the service reads:
+  // Every RANKER_* name the Rollout sets must be one the service reads:
   // a typo would otherwise silently fall back to a localhost default.
   const configSrc = readFileSync(resolve(repoRoot, "src", "config.ts"), "utf8");
   const read = new Set([...configSrc.matchAll(/env\.(RANKER_[A-Z0-9_]+)/g)].map((m) => m[1]!));
   for (const name of CONTRACT) assert.ok(read.has(name), `src/config.ts no longer reads ${name}`);
   for (const name of names.filter((n) => n.startsWith("RANKER_"))) {
-    assert.ok(read.has(name), `Deployment sets ${name}, which src/config.ts does not read`);
+    assert.ok(read.has(name), `Rollout sets ${name}, which src/config.ts does not read`);
   }
 
   // Wiring: database URL from the service role's secret (database.yaml),
@@ -135,7 +135,9 @@ test("kustomize build renders and the Deployment env names match the frozen conf
 test("manifests target namespace corpus-ranker with CNPG, MinIO, ExternalSecrets and no ingress", () => {
   const docs = renderDocs();
   find("Namespace", "corpus-ranker");
-  for (const doc of docs.filter((d) => d.kind !== "Namespace")) {
+  // The one exception is the Argo CD Application, in Argo CD's namespace (tests/deploy/rollout-manifests.test.ts).
+  assert.equal(find("Application", "corpus-ranker").namespace, "argocd");
+  for (const doc of docs.filter((d) => d.kind !== "Namespace" && d.kind !== "Application")) {
     assert.equal(doc.namespace, "corpus-ranker", `${doc.kind}/${doc.name} is not in namespace corpus-ranker`);
   }
 
@@ -153,6 +155,7 @@ test("manifests target namespace corpus-ranker with CNPG, MinIO, ExternalSecrets
   // The bucket is provisioned by its Job (tests/deploy/object-store-manifests.test.ts).
   assert.match(find("Job", "ranker-minio-provision").text, /value: ranker-originals$/m);
   find("Service", "ranker-api");
+  find("Service", "ranker-api-preview");
 
   const externalSecrets = docs.filter((d) => d.kind === "ExternalSecret");
   assert.ok(externalSecrets.length > 0, "no ExternalSecret rendered");

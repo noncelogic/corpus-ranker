@@ -1,6 +1,6 @@
 // CR-IMAGE-ACR-D1 acceptance (deploy step CRANK-212): deploy/acr/check-image-pull.ts
 // reads the corpus-ranker Argo CD Application and the pods of the API
-// Deployment and the migration Job back through kubectl, and exits 0 only when
+// Rollout and the migration Job back through kubectl, and exits 0 only when
 //
 //   - the Application's only kustomize image entry pins
 //     noncelogicci.azurecr.io/corpus-ranker to a sha-<commit> tag,
@@ -273,7 +273,7 @@ test("readback fails naming the workload when an API or migration pod ran an ima
     {
       name: "an API pod still on the ghcr.io image",
       api: podList(apiPod("ranker-api-7c9d5b8f6d-x2k4q", PINNED), apiPod("ranker-api-5f6b7d9c8-old11", GHCR)),
-      expect: [/Deployment\/ranker-api: pod ranker-api-5f6b7d9c8-old11 container api ran ghcr\.io\/noncelogic\/corpus-ranker/],
+      expect: [/Rollout\/ranker-api: pod ranker-api-5f6b7d9c8-old11 container api ran ghcr\.io\/noncelogic\/corpus-ranker/],
       not: [/x2k4q/],
     },
     {
@@ -284,7 +284,7 @@ test("readback fails naming the workload when an API or migration pod ran an ima
     {
       name: "an API pod on the unpinned main tag",
       api: podList(apiPod("ranker-api-7c9d5b8f6d-x2k4q", `${ACR}:main`)),
-      expect: [/Deployment\/ranker-api: pod ranker-api-7c9d5b8f6d-x2k4q container api ran .*corpus-ranker:main/],
+      expect: [/Rollout\/ranker-api: pod ranker-api-7c9d5b8f6d-x2k4q container api ran .*corpus-ranker:main/],
     },
     {
       name: "a pod whose spec names the pin but whose status reports another image",
@@ -292,7 +292,7 @@ test("readback fails naming the workload when an API or migration pod ran an ima
         ...apiPod("ranker-api-7c9d5b8f6d-x2k4q", PINNED),
         status: { containerStatuses: [runningStatus("api", GHCR)] },
       }),
-      expect: [/Deployment\/ranker-api: pod ranker-api-7c9d5b8f6d-x2k4q container api ran ghcr\.io/],
+      expect: [/Rollout\/ranker-api: pod ranker-api-7c9d5b8f6d-x2k4q container api ran ghcr\.io/],
     },
     {
       name: "API and migration containers stuck in image pull with the pin in status.image but no run",
@@ -309,7 +309,7 @@ test("readback fails naming the workload when an API or migration pod ran an ima
         },
       }),
       expect: [
-        /Deployment\/ranker-api: pod ranker-api-7c9d5b8f6d-x2k4q container api never ran: waiting \(ImagePullBackOff/,
+        /Rollout\/ranker-api: pod ranker-api-7c9d5b8f6d-x2k4q container api never ran: waiting \(ImagePullBackOff/,
         /Job\/ranker-db-migrate: pod ranker-db-migrate-8qz7m container migrations never ran: waiting \(ErrImagePull/,
       ],
       not: [/ ran noncelogicci/],
@@ -320,7 +320,7 @@ test("readback fails naming the workload when an API or migration pod ran an ima
         ...apiPod("ranker-api-7c9d5b8f6d-x2k4q", PINNED),
         status: { containerStatuses: [{ ...runningStatus("api", PINNED), imageID: "" }] },
       }),
-      expect: [/Deployment\/ranker-api: pod ranker-api-7c9d5b8f6d-x2k4q container api ran .* but reports no imageID/],
+      expect: [/Rollout\/ranker-api: pod ranker-api-7c9d5b8f6d-x2k4q container api ran .* but reports no imageID/],
     },
     {
       name: "a completed migration whose imageID is a digest of the ghcr.io image",
@@ -341,7 +341,7 @@ test("readback fails naming the workload when an API or migration pod ran an ima
     {
       name: "no API pod",
       api: podList(),
-      expect: [/Deployment\/ranker-api: no pod found/],
+      expect: [/Rollout\/ranker-api: no pod found/],
     },
     {
       name: "a migration pod without the ranker init container",

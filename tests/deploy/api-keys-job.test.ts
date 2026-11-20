@@ -67,7 +67,7 @@ test("the API key Job is a Sync hook ordered before the ranker-api-keys External
   const es = findObject("ExternalSecret", "ranker-api-keys");
   assert.equal(es.metadata.annotations?.["argocd.argoproj.io/hook"], undefined, "the ExternalSecret is a regular resource");
   assert.ok(wave(job) < wave(es), `the Job (wave ${wave(job)}) runs before the ranker-api-keys ExternalSecret (wave ${wave(es)})`);
-  assert.ok(wave(es) < wave(findObject("Deployment", "ranker-api")), "the API starts after its keys are synced");
+  assert.ok(wave(es) < wave(findObject("Rollout", "ranker-api")), "the API starts after its keys are synced");
 
   // Its own service account, shared with no other workload.
   const spec = job.spec.template.spec;

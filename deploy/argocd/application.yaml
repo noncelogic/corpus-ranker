@@ -1,0 +1,53 @@
+# The Argo CD Application that rolls the ranker out to aks-obs-01 (CR-D1-PROMOTE;
+# estate deploy standard: GitOps plus Argo Rollouts blue/green, TECH-STACK §10,
+# DV-61; system-of-record services run on aks-obs-01, placement-defaults#estate).
+#
+# It tracks this repository's deploy/ overlay on main and syncs it into
+# namespace corpus-ranker of the cluster Argo CD itself runs in, aks-obs-01
+# (deploy/acr/check-image-pull.ts reads this Application and the ranker's
+# pods with the one aks-obs-01 kubeconfig). The ranker API in it is the
+# blue/green Rollout in api.yaml, promoted only once its readiness probe passes.
+#
+# The Application is rendered by the overlay it tracks, so it manages itself:
+#   - Prune=false,Delete=false: its own sync never prunes or deletes it, and
+#     it carries no resources finalizer, so removing it never cascades;
+#   - the estate pins the rolled-out image on it (spec.source.kustomize.images,
+#     a sha-<commit> tag; deploy/acr/check-image-pull.ts checks the pin), so it
+#     ignores drift there and self-heal keeps the pin.
+#
+# Estate preconditions, each its own task: a pullable image (CR-D1-IMAGE,
+# CR-D1-PULL), runtime configuration and secrets (CR-D1-SECRETS), the
+# populated database with single-writer role ownership (CR-D1-DB) and the
+# ranker bucket with a single writer (CR-D1-OBJSTORE).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: corpus-ranker
+  namespace: argocd
+  annotations:
+    noncelogic.com/cluster: aks-obs-01
+    argocd.argoproj.io/sync-wave: "0"
+    argocd.argoproj.io/sync-options: Prune=false,Delete=false
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/noncelogic/corpus-ranker.git
+    targetRevision: main
+    path: deploy
+  destination:
+    # In-cluster: Argo CD runs on aks-obs-01.
+    server: https://kubernetes.default.svc
+    namespace: corpus-ranker
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - RespectIgnoreDifferences=true
+  ignoreDifferences:
+    - group: argoproj.io
+      kind: Application
+      name: corpus-ranker
+      namespace: argocd
+      jsonPointers:
+        - /spec/source/kustomize

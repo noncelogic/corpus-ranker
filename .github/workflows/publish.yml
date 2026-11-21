@@ -65,7 +65,11 @@ jobs:
       # job is given OPENBAO_ADDR or an OIDC token (CRANK-219). A failure
       # names the step that could not be reached (oidc, openbao-login,
       # openbao-read, registry-login).
+      # Each external call in it is retried with backoff (3 attempts, each
+      # HTTP call bounded at 30 s, a 4-minute overall deadline);
+      # timeout-minutes is the step's hard bound (CR-PUBLISH-RETRY).
       - name: Registry credential preflight
+        timeout-minutes: 6
         env:
           OPENBAO_ADDR: ${{ vars.OPENBAO_ADDR }}
         run: |
@@ -78,16 +82,24 @@ jobs:
           # stdin). Refuses a credential for any registry but the one IMAGE
           # names.
           EXPECTED_REGISTRY="${IMAGE%%/*}" node .github/scripts/estate-registry-credential.mjs
+      # Build and push each run under publish_retry: 3 attempts with
+      # exponential backoff, no attempt started past the deadline given, and
+      # the step's timeout-minutes as the hard bound; a failure that persists
+      # names the operation and the attempts made (CR-PUBLISH-RETRY).
       - name: Build
         # The one build definition ci.yml's `image` job (DRY_RUN_OF: image)
         # proves on every pull request.
+        timeout-minutes: 10
         run: |
+          . .github/scripts/publish-retry.sh
           . .github/scripts/image-build.sh
-          image_build "${IMAGE}:sha-${GITHUB_SHA}"
+          publish_retry build 480 image_build "${IMAGE}:sha-${GITHUB_SHA}"
       - name: Publish
+        timeout-minutes: 3
         run: |
           export DOCKER_CONFIG="${RUNNER_TEMP}/docker-config"
-          docker push "${IMAGE}:sha-${GITHUB_SHA}"
+          . .github/scripts/publish-retry.sh
+          publish_retry push 120 docker push "${IMAGE}:sha-${GITHUB_SHA}"
       - name: Log out
         if: always()
         run: |

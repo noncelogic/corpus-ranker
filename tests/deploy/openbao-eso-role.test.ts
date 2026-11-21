@@ -158,3 +158,81 @@ test("every ExternalSecret that reads ClusterSecretStore openbao reads only a kv
     ),
   );
 });
+
+// CR-M3-D2-ESOROLEb acceptance: the three ranker readers of the eso-obs
+// attached policies are pinned by name to ClusterSecretStore `openbao` and to
+// the exact kv/data/corpus-ranker/api-keys and kv/data/corpus-ranker/minio
+// grants of external-secrets-corpus-ranker and external-secrets-corpus-ranker-minio
+// (granted and read back 2026-11-20, CRANK-188; Rule: policies/placement-defaults.yaml#estate,
+// Rule: policies/placement-defaults.yaml#code_location). The estate-held ACR pull
+// grant is not one of those policies, so none of these readers may use it.
+const ATTACHED_READERS: Record<string, string> = {
+  "ranker-api-keys": "kv/data/corpus-ranker/api-keys",
+  "ranker-minio": "kv/data/corpus-ranker/minio",
+  "ranker-minio-service": "kv/data/corpus-ranker/minio",
+};
+
+/** The policy-path form (kv v2 data path) of an ExternalSecret remote key on the `openbao` store. */
+const dataPath = (key: string): string => `kv/data/${key}`;
+
+/** Assert each named reader exists, reads only ClusterSecretStore openbao, and reads only its attached-policy path. */
+function assertAttachedReaders(objs: K8sObject[], a: Attach): void {
+  const policyPath = new Map(a.add_token_policies.map((p) => [p.name, dataPath(grantedPath(p.file))]));
+  assert.deepEqual(
+    Object.fromEntries(policyPath),
+    { "external-secrets-corpus-ranker-minio": "kv/data/corpus-ranker/minio", "external-secrets-corpus-ranker": "kv/data/corpus-ranker/api-keys" },
+    "the eso-obs attached policies grant exactly kv/data/corpus-ranker/minio and kv/data/corpus-ranker/api-keys",
+  );
+  const attachedPaths = new Set(policyPath.values());
+  for (const [name, expected] of Object.entries(ATTACHED_READERS)) {
+    const matches = objs.filter((o) => o.kind === "ExternalSecret" && o.metadata.name === name);
+    assert.equal(matches.length, 1, `exactly one ExternalSecret/${name} must be rendered`);
+    const es = matches[0]!;
+    const s = es.spec ?? {};
+    assert.deepEqual(s.secretStoreRef, { kind: "ClusterSecretStore", name: "openbao" }, `ExternalSecret/${name} must read ClusterSecretStore openbao`);
+    assert.deepEqual(storesRead(es), [s.secretStoreRef], `ExternalSecret/${name} must read no store but ClusterSecretStore openbao`);
+    const entries = [...(s.data ?? []), ...(s.dataFrom ?? [])] as Array<Record<string, any>>;
+    assert.ok(entries.length > 0, `ExternalSecret/${name} reads nothing`);
+    for (const e of entries) {
+      assert.equal(e.sourceRef, undefined, `ExternalSecret/${name} must not name an alternate source`);
+      assert.equal(e.find, undefined, `ExternalSecret/${name} must not search the store`);
+    }
+    const keys = remoteKeys(es);
+    assert.equal(keys.length, entries.length, `every entry of ExternalSecret/${name} must name one remote key`);
+    for (const key of keys) {
+      assert.ok(attachedPaths.has(dataPath(key)), `ExternalSecret/${name} reads ${dataPath(key)}, which no eso-obs attached policy grants`);
+      assert.equal(dataPath(key), expected, `ExternalSecret/${name} must read only ${expected}`);
+    }
+  }
+}
+
+test("ranker-api-keys, ranker-minio and ranker-minio-service each read through ClusterSecretStore openbao only the kv/data/corpus-ranker path an eso-obs attached policy grants", () => {
+  const objs = renderObjects();
+  const a = readAttach();
+  assertAttach(a);
+  assertAttachedReaders(objs, a);
+
+  // The check refuses a missing reader, another store, an alternate source, a
+  // search, the registry exception, and a path the other policy grants.
+  const mutate = (name: string, f: (spec: Record<string, any>) => void): K8sObject[] =>
+    objs.map((o) => {
+      if (o.kind !== "ExternalSecret" || o.metadata.name !== name) return o;
+      const c = structuredClone(o);
+      f(c.spec);
+      return c;
+    });
+  assert.throws(() => assertAttachedReaders(objs.filter((o) => !(o.kind === "ExternalSecret" && o.metadata.name === "ranker-minio-service")), a));
+  assert.throws(() => assertAttachedReaders(mutate("ranker-minio", (s) => (s.secretStoreRef = { kind: "SecretStore", name: "openbao" })), a));
+  assert.throws(() => assertAttachedReaders(mutate("ranker-api-keys", (s) => (s.secretStoreRef = { kind: "ClusterSecretStore", name: "vault" })), a));
+  assert.throws(() =>
+    assertAttachedReaders(
+      mutate("ranker-minio-service", (s) => (s.data[0].sourceRef = { storeRef: { kind: "ClusterSecretStore", name: "azure-kv" } })),
+      a,
+    ),
+  );
+  assert.throws(() => assertAttachedReaders(mutate("ranker-api-keys", (s) => (s.dataFrom = [{ sourceRef: { generatorRef: { kind: "Password", name: "ranker-db-password" } } }])), a));
+  assert.throws(() => assertAttachedReaders(mutate("ranker-api-keys", (s) => (s.dataFrom = [{ find: { path: "corpus-ranker" } }])), a));
+  assert.throws(() => assertAttachedReaders(mutate("ranker-minio", (s) => (s.data[0].remoteRef.key = "corpus-ranker/acr-pull")), a));
+  assert.throws(() => assertAttachedReaders(mutate("ranker-api-keys", (s) => (s.dataFrom = [{ extract: { key: "corpus-ranker/minio" } }])), a));
+  assert.throws(() => assertAttachedReaders(mutate("ranker-minio-service", (s) => (s.data[1].remoteRef.key = "corpus-ranker/api-keys")), a));
+});

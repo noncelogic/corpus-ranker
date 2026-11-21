@@ -31,7 +31,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { createServer as createTcpServer, type AddressInfo, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const SCRIPT = resolve(repoRoot, ".github", "scripts", "estate-registry-credential.mjs");
@@ -62,7 +62,10 @@ async function standIn(t: TestContext, name: string, log: string[], handle: Hand
     });
   });
   await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
-  t.after(() => server.close());
+  t.after(() => {
+    server.closeAllConnections();
+    server.close();
+  });
   return `127.0.0.1:${(server.address() as AddressInfo).port}`;
 }
 
@@ -88,6 +91,26 @@ interface Down {
   registry?: boolean;
 }
 
+/**
+ * Transient faults: how many times each endpoint answers HTTP 503 before it
+ * answers normally (the registry's 503 makes the stand-in docker login exit 1).
+ * `openbaoReadHang` holds the secret read open without answering that many times.
+ */
+interface Flaky {
+  openbaoLogin?: number;
+  openbaoRead?: number;
+  openbaoReadHang?: number;
+  registry?: number;
+}
+
+interface Options {
+  down?: Down;
+  flaky?: Flaky;
+  env?: Record<string, string>;
+  /** Extra node flags for the script's process (e.g. --import of a recording preload). */
+  nodeArgs?: string[];
+}
+
 interface Run {
   code: number | null;
   stderr: string;
@@ -98,8 +121,12 @@ interface Run {
   dockerConfig?: string;
 }
 
-async function runScript(t: TestContext, down: Down = {}, env: Record<string, string> = {}): Promise<Run> {
+async function runScript(t: TestContext, opts: Options = {}): Promise<Run> {
+  const { down = {}, flaky = {}, env = {}, nodeArgs = [] } = opts;
   const requests: string[] = [];
+  const seen: Record<string, number> = {};
+  /** True while `key` is still inside its injected transient-fault count. */
+  const faulty = (key: keyof Flaky): boolean => (seen[key] = (seen[key] ?? 0) + 1) <= (flaky[key] ?? 0);
   const oidc = await standIn(t, "oidc", requests, (req, res) => {
     const url = new URL(req.url ?? "/", "http://x");
     if (req.headers.authorization !== `Bearer ${OIDC_REQUEST_TOKEN}`) return send(res, 401, {});
@@ -109,12 +136,15 @@ async function runScript(t: TestContext, down: Down = {}, env: Record<string, st
   const openbao = await standIn(t, "openbao", requests, (req, res, body) => {
     const path = new URL(req.url ?? "/", "http://x").pathname;
     if (req.method === "POST" && path === "/v1/auth/jwt/login") {
+      if (faulty("openbaoLogin")) return send(res, 503, { errors: ["sealed"] });
       const { role, jwt } = JSON.parse(body || "{}") as { role?: string; jwt?: string };
       if (role !== ROLE || jwt !== OIDC_JWT) return send(res, 403, { errors: ["permission denied"] });
       return send(res, 200, { auth: { client_token: BAO_TOKEN } });
     }
     if (req.method === "GET" && path === SECRET) {
       if (down.openbaoRead) return req.socket.destroy();
+      if (faulty("openbaoReadHang")) return; // never answered
+      if (faulty("openbaoRead")) return send(res, 503, { errors: ["standby"] });
       if (req.headers["x-vault-token"] !== BAO_TOKEN) return send(res, 403, { errors: ["permission denied"] });
       return send(res, 200, { data: { data: { registry, username: USERNAME, password: PASSWORD }, metadata: { version: 1 } } });
     }
@@ -125,6 +155,7 @@ async function runScript(t: TestContext, down: Down = {}, env: Record<string, st
   let registry = await standIn(t, "registry", requests, (req, res) => {
     const path = new URL(req.url ?? "/", "http://x").pathname;
     if (req.method !== "GET" || path !== "/v2/") return send(res, 404, {});
+    if (faulty("registry")) return send(res, 503, { errors: [{ code: "UNAVAILABLE" }] });
     if (req.headers.authorization !== basic) {
       res.setHeader("WWW-Authenticate", 'Basic realm="standin"');
       return send(res, 401, { errors: [{ code: "UNAUTHORIZED" }] });
@@ -181,7 +212,7 @@ process.stdin.on("end", async () => {
 
   const oidcAddr = down.oidc ? await unreachable() : oidc;
   const baoAddr = down.openbao ? await unreachable() : openbao;
-  const child = spawn(process.execPath, [SCRIPT], {
+  const child = spawn(process.execPath, [...nodeArgs, SCRIPT], {
     cwd: repoRoot,
     env: {
       PATH: `${bin}:${process.env.PATH}`,
@@ -191,6 +222,9 @@ process.stdin.on("end", async () => {
       ACTIONS_ID_TOKEN_REQUEST_TOKEN: OIDC_REQUEST_TOKEN,
       OPENBAO_ADDR: `http://${baoAddr}`,
       EXPECTED_REGISTRY: registry,
+      // Short backoff between attempts so the stand-in runs stay fast; the
+      // attempt bound and the 30-second HTTP bound are the script's own.
+      PUBLISH_RETRY_BACKOFF_MS: "10",
       ...env,
     },
     stdio: ["ignore", "pipe", "pipe"],
@@ -256,11 +290,12 @@ test("the credential script logs in against stand-in OIDC, OpenBao and registry 
   const cases: Array<[keyof Down, string, RegExp, string[]]> = [
     ["oidc", "oidc", /GitHub OIDC token endpoint/, []],
     ["openbao", "openbao-login", /OpenBao auth\/jwt\/login/, ["oidc GET /oidc"]],
-    ["openbaoRead", "openbao-read", /OpenBao kv\/data\/corpus-ranker\/acr-push/, ["oidc GET /oidc", "openbao POST /v1/auth/jwt/login", `openbao GET ${SECRET}`]],
+    // A dropped connection is transient, so the read is attempted up to the bound (3) before failing.
+    ["openbaoRead", "openbao-read", /OpenBao kv\/data\/corpus-ranker\/acr-push/, ["oidc GET /oidc", "openbao POST /v1/auth/jwt/login", ...Array(3).fill(`openbao GET ${SECRET}`)]],
     ["registry", "registry-login", /docker login 127\.0\.0\.1:\d+/, ["oidc GET /oidc", "openbao POST /v1/auth/jwt/login", `openbao GET ${SECRET}`]],
   ];
   for (const [down, step, what, before] of cases) {
-    const run = await runScript(t, { [down]: true });
+    const run = await runScript(t, { down: { [down]: true } });
     assert.equal(run.code, 1, `${down} down must fail the script: ${run.stderr}`);
     const last = run.stderr.trim().split("\n").at(-1)!;
     assert.match(last, new RegExp(`^estate-registry-credential: step ${step} \\(`), `${down} down: the failure names step ${step}: ${run.stderr}`);
@@ -281,8 +316,88 @@ test("the credential script logs in against stand-in OIDC, OpenBao and registry 
   }
 
   // Incomplete configuration also names its step, before anything is contacted.
-  const noAddr = await runScript(t, {}, { OPENBAO_ADDR: "" });
+  const noAddr = await runScript(t, { env: { OPENBAO_ADDR: "" } });
   assert.equal(noAddr.code, 1);
   assert.match(noAddr.stderr, /step openbao-login \(.*\): OPENBAO_ADDR is not set/, noAddr.stderr);
   assert.deepEqual(noAddr.requests, [], "nothing is contacted when the configuration is incomplete");
+});
+
+// CR-PUBLISH-RETRY acceptance (CRANK-219 tripwire: bounded transient-failure
+// retries and timeouts, keeping the 30-second HTTP bound). Each external
+// call the script makes (OIDC, OpenBao login, OpenBao read, docker login) is
+// retried with backoff up to 3 attempts inside an overall deadline; a
+// transient fault (unreachable, timed out, HTTP 408/429/5xx, docker login
+// failing) is retried, a refusal (other 4xx) is not.
+const ATTEMPTS = 3;
+
+test("a transient OpenBao or registry failure is retried within the bound and then succeeds", async (t) => {
+  for (const [flaky, step, request] of [
+    [{ openbaoLogin: 2 }, "openbao-login", "openbao POST /v1/auth/jwt/login"],
+    [{ openbaoRead: 1 }, "openbao-read", `openbao GET ${SECRET}`],
+    [{ registry: 2 }, "registry-login", "registry GET /v2/"],
+  ] as Array<[Flaky, string, string]>) {
+    const failures = Object.values(flaky)[0]!;
+    const run = await runScript(t, { flaky });
+    assert.equal(run.code, 0, `${step}: ${failures} transient failure(s) are retried and the login succeeds: ${run.stderr}`);
+    assert.equal(run.requests.filter((r) => r === request).length, failures + 1, `${step}: one attempt per failure plus the one that succeeds`);
+    for (let n = 1; n <= failures; n++) {
+      assert.match(run.stderr, new RegExp(`step ${step}: attempt ${n} of ${ATTEMPTS} failed .*; retrying in \\d+ ms`), run.stderr);
+    }
+    assert.doesNotMatch(run.stderr, new RegExp(`step ${step}: attempt ${failures + 1} of`), "no attempt after the one that succeeds");
+    for (const s of ["oidc", "openbao-login", "openbao-read", "registry-login"]) assert.match(run.stderr, new RegExp(`step ${s}: ok`));
+    if (step === "registry-login") assert.equal(run.dockerCalls.length, failures + 1, "docker login is re-run per attempt");
+    assert.ok(run.dockerConfig, `${step}: the registry login is stored`);
+    assertNoSecretPrinted(run);
+  }
+});
+
+test("a failure that persists past the retry bound exits non-zero naming the operation and attempts, and each HTTP call stays bounded at 30 seconds", async (t) => {
+  // Persisting 503s: exactly ATTEMPTS attempts, then exit 1 with one line
+  // naming the step (the operation) and the attempts made; nothing after it runs.
+  for (const [flaky, step, request] of [
+    [{ openbaoLogin: 99 }, "openbao-login", "openbao POST /v1/auth/jwt/login"],
+    [{ openbaoRead: 99 }, "openbao-read", `openbao GET ${SECRET}`],
+    [{ registry: 99 }, "registry-login", "registry GET /v2/"],
+  ] as Array<[Flaky, string, string]>) {
+    const run = await runScript(t, { flaky });
+    assert.equal(run.code, 1, `${step}: a persisting failure fails the script: ${run.stderr}`);
+    assert.equal(run.requests.filter((r) => r === request).length, ATTEMPTS, `${step}: attempted exactly ${ATTEMPTS} times`);
+    const last = run.stderr.trim().split("\n").at(-1)!;
+    assert.match(last, new RegExp(`^estate-registry-credential: step ${step} \\(.*\\): .*; gave up after ${ATTEMPTS} attempts`), last);
+    assert.match(last, step === "registry-login" ? /docker login exited 1/ : /HTTP 503/, last);
+    if (step !== "registry-login") assert.ok(!run.requests.includes("registry GET /v2/"), "no registry login after a failed OpenBao step");
+    assert.equal(run.dockerConfig, undefined);
+    assertNoSecretPrinted(run);
+  }
+
+  // A refusal is not transient: one attempt, and the failure says so.
+  const refused = await runScript(t, { env: { ACTIONS_ID_TOKEN_REQUEST_TOKEN: "wrong" } });
+  assert.equal(refused.code, 1);
+  assert.deepEqual(refused.requests, ["oidc GET /oidc"], "a refusal (HTTP 401) is not retried");
+  assert.match(refused.stderr.trim().split("\n").at(-1)!, /step oidc \(.*\): refused: HTTP 401; not retried \(1 attempt\)/);
+
+  // The 30-second bound: a preload records the timeout every abort signal the
+  // script asks for and scales it down 1000x, so a secret read that never
+  // answers is cut off by that bound (30 ms here, 30 s in production) on
+  // every attempt instead of waiting forever.
+  const dir = mkdtempSync(join(tmpdir(), "regcred-timeout-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const log = join(dir, "timeouts");
+  const preload = join(dir, "record-timeouts.mjs");
+  writeFileSync(
+    preload,
+    `import { appendFileSync } from "node:fs";\n` +
+      `const real = AbortSignal.timeout.bind(AbortSignal);\n` +
+      `AbortSignal.timeout = (ms) => { appendFileSync(${JSON.stringify(log)}, ms + "\\n"); return real(Math.ceil(ms / 1000)); };\n`,
+  );
+  const hung = await runScript(t, { flaky: { openbaoReadHang: 99 }, nodeArgs: ["--import", pathToFileURL(preload).href] });
+  assert.equal(hung.code, 1, hung.stderr);
+  assert.equal(hung.requests.filter((r) => r === `openbao GET ${SECRET}`).length, ATTEMPTS);
+  assert.match(hung.stderr.trim().split("\n").at(-1)!, new RegExp(`step openbao-read \\(.*\\): could not be reached \\(TimeoutError\\); gave up after ${ATTEMPTS} attempts`));
+  const bounds = readFileSync(log, "utf8").trim().split("\n").map(Number);
+  // oidc + login + 3 reads + revoke: every HTTP call carries the bound, and it is 30 seconds.
+  assert.equal(bounds.length, 1 + 1 + ATTEMPTS + 1, `one bounded signal per HTTP call: ${bounds.join(",")}`);
+  assert.deepEqual([...new Set(bounds)], [30_000], "each HTTP call is bounded at 30 seconds");
+  // The docker login child is bounded at 30 seconds too (static: it is not an HTTP call the preload sees).
+  assert.match(readFileSync(SCRIPT, "utf8"), /const TIMEOUT_MS = 30_000;/);
 });

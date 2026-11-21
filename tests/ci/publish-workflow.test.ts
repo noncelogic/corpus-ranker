@@ -581,14 +581,14 @@ test("publish.yml on main runs the credential preflight before the image build, 
   const deadAddr = `http://127.0.0.1:${(gone.address() as AddressInfo).port}`;
   let down: Simulation;
   try {
-    down = await simulate(t, PUSH_MAIN, { creds: GOOD }, { workflows: ["publish.yml"], openbaoAddr: deadAddr });
+    down = await simulate(t, PUSH_MAIN, { creds: GOOD }, { workflows: ["publish.yml"], openbaoAddr: deadAddr, env: { PUBLISH_RETRY_BACKOFF_MS: "10" } });
   } finally {
     await new Promise<void>((done) => gone.close(() => done()));
   }
   const downJob = publishJob(down);
   assert.equal(downJob.status, "failure", "an unreachable OpenBao fails the publish run");
   assert.equal(downJob.steps[preflight]!.status, "failure");
-  assert.match(downJob.steps[preflight]!.output, /step openbao-login \(OpenBao auth\/jwt\/login .*\): could not be reached/, down.output);
+  assert.match(downJob.steps[preflight]!.output, /step openbao-login \(OpenBao auth\/jwt\/login .*\): could not be reached .*; gave up after 3 attempts/, down.output);
   assert.equal(downJob.steps[build]!.status, "skipped", "no build is spent after a failed preflight");
   assert.equal(downJob.steps[publish]!.status, "skipped");
   assert.deepEqual(down.calls.filter((c) => /^docker (build|login|push) /.test(c)), [], "nothing built, logged in to or pushed");
@@ -613,4 +613,47 @@ test("publish.yml on main runs the credential preflight before the image build, 
   assert.doesNotMatch(standIns, /azurecr\.io/, "the stand-in test names no real registry");
   assert.doesNotMatch(standIns, /process\.env\.(?!(?:PATH|DOCKER_CONFIG)\b)\w+/, "the stand-in test takes no endpoint or credential from the environment");
   assert.doesNotMatch(standIns, /\bproves? (?:live )?reachability|live reachability is proven/i, "the stand-in test does not claim to prove reachability");
+});
+
+// CR-PUBLISH-RETRY acceptance (CRANK-219 tripwire): publish.yml's build and
+// push run under the bounded retry in .github/scripts/publish-retry.sh (3
+// attempts, exponential backoff, an overall deadline), and each of those
+// steps and the credential preflight carries its own timeout-minutes.
+test("publish retries a transient build or push failure within the bound, and a persisting one fails naming the operation and attempts", async (t) => {
+  type Step = { name?: string; run?: string; "timeout-minutes"?: number };
+  const steps = (jobsOf("publish.yml").image as { steps: Step[] }).steps;
+  for (const name of ["Registry credential preflight", "Build", "Publish"]) {
+    const s = steps.find((x) => x.name === name)!;
+    assert.ok(typeof s["timeout-minutes"] === "number" && s["timeout-minutes"] > 0, `${name} has an overall timeout-minutes`);
+  }
+  const fast = { PUBLISH_RETRY_BACKOFF_MS: "10" };
+
+  // Two transient failures each: retried, then the one SHA tag is pushed.
+  const flaky = await simulate(t, PUSH_MAIN, { creds: GOOD }, { workflows: ["publish.yml"], env: { ...fast, FAKE_DOCKER_FAIL_BUILD: "2", FAKE_DOCKER_FAIL_PUSH: "2" } });
+  const job = publishJob(flaky);
+  assert.equal(job.status, "success", flaky.output);
+  assert.equal(flaky.calls.filter((c) => c.startsWith("docker build ")).length, 3, "build attempted 3 times");
+  assert.equal(flaky.calls.filter((c) => c === `docker push ${IMAGE}:sha-${SHA}`).length, 3, "push attempted 3 times");
+  for (const op of ["build", "push"]) {
+    assert.match(flaky.output, new RegExp(`publish-retry: ${op}: attempt 1 of 3 failed \\(exit 1\\); retrying in \\d+ ms`), flaky.output);
+    assert.match(flaky.output, new RegExp(`publish-retry: ${op}: attempt 2 of 3 failed`), flaky.output);
+  }
+
+  // A push that keeps failing: 3 attempts, then the step fails naming the
+  // operation and the attempts made.
+  const stuck = await simulate(t, PUSH_MAIN, { creds: GOOD }, { workflows: ["publish.yml"], env: { ...fast, FAKE_DOCKER_FAIL_PUSH: "99" } });
+  const stuckJob = publishJob(stuck);
+  assert.equal(stuckJob.status, "failure", "a persisting push failure fails the run");
+  const publishStep = stuckJob.steps.find((s) => s.name === "Publish")!;
+  assert.equal(publishStep.status, "failure");
+  assert.equal(stuck.calls.filter((c) => c.startsWith("docker push ")).length, 3, "push attempted exactly 3 times");
+  assert.match(publishStep.output, /publish-retry: push: failed after 3 attempts \(last exit 1\)/, publishStep.output);
+  assert.equal(stuckJob.steps.find((s) => s.name === "Log out")!.status, "success", "the credential is still logged out");
+
+  // A build that keeps failing: nothing is pushed.
+  const broken = await simulate(t, PUSH_MAIN, { creds: GOOD }, { workflows: ["publish.yml"], env: { ...fast, FAKE_DOCKER_FAIL_BUILD: "99" } });
+  assert.equal(publishJob(broken).status, "failure");
+  assert.equal(broken.calls.filter((c) => c.startsWith("docker build ")).length, 3);
+  assert.deepEqual(broken.calls.filter((c) => c.startsWith("docker push ")), [], "nothing is pushed after a failed build");
+  assert.match(broken.output, /publish-retry: build: failed after 3 attempts \(last exit 1\)/);
 });

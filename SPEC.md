@@ -118,6 +118,7 @@ Transport-neutral operation names; the concrete bindings are in TECH-STACK.md (R
 | `rank` | corpus_id, policy_id (+version), query (subject text and/or filters), N | New Ranked View (entries with composite + score citations) |
 | `get_top_n` | view_id **or** (corpus_id, policy name, query, N) | Ordered entries: item summary, composite, per-dimension values — small enough to hand a model as pre-digested context |
 | `explain_score` | item_id, policy_id | Every contributing Score event: dimension, value, reason, evidence, scorer, policy version; plus retraction/supersession state of the item and its evidence |
+| `get_policy` | policy_id, version | The stored Policy version as plain data (A2.6): dimensions, judge_config (allowed scorers, source_blind), composite_rule — read from the store, never from seed code; unknown id or version is not-found |
 | `replay` | policy_id, from_version, to_version, corpus_id | Re-scores (or re-derives composites) over the stored corpus under the new policy version without touching old Score events; produces new views; reports a diff summary (what moved, by how much) |
 | `search` | corpus_id, subject query, filters (labels, score ranges, date) | Vector + filter retrieval over Items, ranked by similarity, **unscored items included and marked as such** — retrieval is not ranking |
 | `supersede_item` | item_id, new_item_id or reason, type (fact replacement) | Old Item marked superseded; edges written; dependent views stale |

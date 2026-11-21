@@ -602,6 +602,61 @@
         }
       }
     },
+    "/v1/policies/{policy_id}/versions/{version}": {
+      "get": {
+        "operationId": "get_policy",
+        "summary": "One stored Policy version as plain data (SPEC A2.6), read from the store. Requires an API key.",
+        "security": [
+          {
+            "apiKey": []
+          }
+        ],
+        "parameters": [
+          {
+            "name": "policy_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "schemas/v1/common.schema.json#/$defs/policy_id"
+            }
+          },
+          {
+            "name": "version",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "$ref": "schemas/v1/common.schema.json#/$defs/policy_version"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The stored Policy version.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Policy"
+                },
+                "examples": {
+                  "paper_rubric_v1": {
+                    "externalValue": "examples/v1/policy/valid/paper-rubric-v1.json"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/400"
+          },
+          "401": {
+            "$ref": "#/components/responses/401"
+          },
+          "404": {
+            "$ref": "#/components/responses/404"
+          }
+        }
+      }
+    },
     "/v1/policies/{policy_id}/replay": {
       "post": {
         "operationId": "replay",
@@ -1007,6 +1062,16 @@
     "responses": {
       "400": {
         "description": "Malformed request.",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        }
+      },
+      "401": {
+        "description": "The request carries no valid API key.",
         "content": {
           "application/json": {
             "schema": {
@@ -1814,6 +1879,13 @@
             }
           }
         }
+      }
+    },
+    "securitySchemes": {
+      "apiKey": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Per-principal API key (TECH-STACK §9), sent as Authorization: Bearer <key>."
       }
     }
   }

@@ -28,7 +28,7 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import type { AddressInfo } from "node:net";
+import { createServer as createTcpServer, type AddressInfo, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -66,14 +66,19 @@ async function standIn(t: TestContext, name: string, log: string[], handle: Hand
   return `127.0.0.1:${(server.address() as AddressInfo).port}`;
 }
 
-/** An address nothing listens on: a port that was bound and released. */
-async function closedAddress(): Promise<string> {
-  const server = createServer();
+/**
+ * An unreachable endpoint that stays bound for the whole scenario: a local TCP
+ * listener that destroys every connection it accepts, so no other listener can
+ * take the port between choosing it and the request. The caller closes it,
+ * awaited, once the child process has completed.
+ */
+async function droppingListener(): Promise<{ addr: string; server: Server }> {
+  const server = createTcpServer((socket) => socket.destroy());
   await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
-  const { port } = server.address() as AddressInfo;
-  await new Promise<void>((done) => server.close(() => done()));
-  return `127.0.0.1:${port}`;
+  return { addr: `127.0.0.1:${(server.address() as AddressInfo).port}`, server };
 }
+
+const closeServer = (server: Server): Promise<void> => new Promise((done) => server.close(() => done()));
 
 interface Down {
   oidc?: boolean;
@@ -127,8 +132,14 @@ async function runScript(t: TestContext, down: Down = {}, env: Record<string, st
     send(res, 200, {});
   });
   // The OpenBao secret names this registry, and EXPECTED_REGISTRY matches it;
-  // a down registry is the same address with nothing listening.
-  if (down.registry) registry = await closedAddress();
+  // a down registry is an address whose listener drops every connection.
+  const dropping: Server[] = [];
+  const unreachable = async (): Promise<string> => {
+    const { addr, server } = await droppingListener();
+    dropping.push(server);
+    return addr;
+  };
+  if (down.registry) registry = await unreachable();
 
   const dir = mkdtempSync(join(tmpdir(), "regcred-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -168,8 +179,8 @@ process.stdin.on("end", async () => {
   );
   chmodSync(join(bin, "docker"), 0o755);
 
-  const oidcAddr = down.oidc ? await closedAddress() : oidc;
-  const baoAddr = down.openbao ? await closedAddress() : openbao;
+  const oidcAddr = down.oidc ? await unreachable() : oidc;
+  const baoAddr = down.openbao ? await unreachable() : openbao;
   const child = spawn(process.execPath, [SCRIPT], {
     cwd: repoRoot,
     env: {
@@ -188,7 +199,12 @@ process.stdin.on("end", async () => {
   let stderr = "";
   child.stdout.on("data", (c: Buffer) => (stdout += c.toString()));
   child.stderr.on("data", (c: Buffer) => (stderr += c.toString()));
-  const [code] = (await once(child, "close")) as [number | null];
+  let code: number | null;
+  try {
+    [code] = (await once(child, "close")) as [number | null];
+  } finally {
+    await Promise.all(dropping.map(closeServer));
+  }
   const read = (f: string): string | undefined => {
     try {
       return readFileSync(f, "utf8");

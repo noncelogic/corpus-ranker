@@ -22,7 +22,7 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { chmodSync, cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
-import type { AddressInfo } from "node:net";
+import { createServer as createTcpServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -573,11 +573,18 @@ test("publish.yml on main runs the credential preflight before the image build, 
 
   // OpenBao unreachable from the runner: the preflight fails naming the
   // step, the image is never built and nothing is pushed.
-  const gone = createServer();
+  // The dead address stays bound for the whole run by a listener that drops
+  // every connection it accepts, so no other listener (the simulation's own
+  // servers included) can take the port; it is closed once the run completes.
+  const gone = createTcpServer((socket) => socket.destroy());
   await new Promise<void>((done) => gone.listen(0, "127.0.0.1", done));
   const deadAddr = `http://127.0.0.1:${(gone.address() as AddressInfo).port}`;
-  await new Promise<void>((done) => gone.close(() => done()));
-  const down = await simulate(t, PUSH_MAIN, { creds: GOOD }, { workflows: ["publish.yml"], openbaoAddr: deadAddr });
+  let down: Simulation;
+  try {
+    down = await simulate(t, PUSH_MAIN, { creds: GOOD }, { workflows: ["publish.yml"], openbaoAddr: deadAddr });
+  } finally {
+    await new Promise<void>((done) => gone.close(() => done()));
+  }
   const downJob = publishJob(down);
   assert.equal(downJob.status, "failure", "an unreachable OpenBao fails the publish run");
   assert.equal(downJob.steps[preflight]!.status, "failure");

@@ -1,4 +1,8 @@
 # Opt-in backfill of the checksummed Juno export. Never part of normal Argo sync.
+# Apply only rendered with a published image tag (the ranker image below is
+# untagged; publish.yml pushes only sha-<commit>):
+#
+#   node deploy/opt-in-job.ts history-import sha-<40-hex commit> | kubectl apply -n corpus-ranker -f -
 apiVersion: batch/v1
 kind: Job
 metadata:

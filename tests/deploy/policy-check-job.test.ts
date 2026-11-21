@@ -4,7 +4,8 @@
 // read-only `--check-policy` mode, given only RANKER_DATABASE_URL.
 //
 // The manifest is read as written (it is applied by hand, never rendered by
-// the overlay). The last test runs the Job's own command, as declared, with
+// the overlay); its image is checked as the documented path renders it
+// (`node deploy/opt-in-job.ts policy-check sha-<commit>`). The last test runs the Job's own command, as declared, with
 // exactly the environment it declares (its secretKeyRef resolved to a fresh
 // database) and checks it reports the policy and writes nothing.
 import { test } from "node:test";
@@ -27,6 +28,15 @@ function readJob(file: string): K8sObject {
 }
 
 const policyCheck = () => readJob("policy-check-job.yaml");
+
+/** Render an opt-in Job through its documented path with the given tag. */
+function renderJob(job: string, tag: string): K8sObject {
+  const r = spawnSync(process.execPath, [resolve(deployDir, "opt-in-job.ts"), job, tag], { cwd: repoRoot, encoding: "utf8" });
+  assert.equal(r.status, 0, r.stderr);
+  const jobs = (parseYamlDocs(r.stdout) as unknown as K8sObject[]).filter((o) => o.kind === "Job");
+  assert.equal(jobs.length, 1);
+  return jobs[0]!;
+}
 const historyImport = () => readJob("job.yaml");
 
 test("the policy-check Job runs the importer's --check-policy mode with only the database URL, mounting no import volume and no object-store credentials", () => {
@@ -39,8 +49,7 @@ test("the policy-check Job runs the importer's --check-policy mode with only the
   assert.deepEqual(pod.imagePullSecrets, [{ name: "ranker-registry-pull" }]);
   assert.equal(pod.containers.length, 1);
   const [c] = pod.containers;
-  assert.equal(c.image, IMAGE, "the ranker image, pinned like the history import Job");
-  assert.equal(c.image, historyImport().spec.template.spec.containers[0].image);
+  assert.equal(c.image, IMAGE, "the ranker image, tagged only when rendered (deploy/opt-in-job.ts)");
   assert.deepEqual([...c.command, ...(c.args ?? [])], ["node", "dist/import/juno-historical-import.js", "--check-policy"]);
   assert.equal(c.volumeMounts, undefined);
   assert.equal(c.envFrom, undefined);
@@ -48,6 +57,17 @@ test("the policy-check Job runs the importer's --check-policy mode with only the
     { name: "RANKER_DATABASE_URL", valueFrom: { secretKeyRef: { name: "ranker-db-service", key: "uri" } } },
   ]);
   assert.doesNotMatch(JSON.stringify(job), /RANKER_S3_|ranker-minio|RANKER_IMPORT_DIR|juno-papers-export/);
+});
+
+test("the policy-check Job's ranker image carries the same sha-<commit> tag as the history import Job", () => {
+  const tag = "sha-535bf267131c58c223a3577c770fe4bb1a4b9528";
+  const check = renderJob("policy-check", tag);
+  const history = renderJob("history-import", tag);
+  const images = (job: K8sObject): string[] =>
+    [...(job.spec.template.spec.initContainers ?? []), ...job.spec.template.spec.containers].map((c: { image: string }) => c.image);
+  assert.deepEqual(images(check), [`${IMAGE}:${tag}`]);
+  assert.deepEqual([...new Set(images(history))], [`${IMAGE}:${tag}`]);
+  assert.equal(check.spec.template.spec.containers[0].image, history.spec.template.spec.containers[0].image);
 });
 
 test("deploy/kustomization.yaml does not render the policy-check Job, so an Argo sync never runs it", () => {

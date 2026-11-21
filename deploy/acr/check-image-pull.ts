@@ -38,13 +38,19 @@
 //
 // Each read is one `kubectl get`; kubectl itself chunks list reads, so this
 // script runs no paging loop.
+//
+// The comparison itself is exported as checkImagePull (reads in, mismatches
+// out), so deploy/estate/check-cutover-preconditions.ts reuses it on the same
+// objects read through the Kubernetes API.
 import { spawnSync } from "node:child_process";
+import { resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const REGISTRY_IMAGE = "noncelogicci.azurecr.io/corpus-ranker";
-const APP = { name: "corpus-ranker", namespace: "argocd" };
+export const REGISTRY_IMAGE = "noncelogicci.azurecr.io/corpus-ranker";
+export const APP = { name: "corpus-ranker", namespace: "argocd" };
 const NAMESPACE = "corpus-ranker";
 /** Each checked workload: its pods' label value and the container that runs the ranker image. */
-const WORKLOADS = [
+export const WORKLOADS = [
   { id: "Rollout/ranker-api", label: "ranker-api", container: { name: "api", init: false } },
   { id: "Job/ranker-db-migrate", label: "ranker-db-migrate", container: { name: "migrations", init: true } },
 ] as const;
@@ -54,7 +60,7 @@ const SHA_TAG = /^sha-[0-9a-f]{40}$/;
 const isAnyRankerImage = (image: string) => /(^|\/)corpus-ranker(?:[:@]|$)/.test(image);
 const quote = (v: unknown) => JSON.stringify(v);
 
-class ReadError extends Error {}
+export class ReadError extends Error {}
 
 /** Run `kubectl` and parse its JSON; undefined when the object does not exist. */
 function kubectl(args: string[]): unknown {
@@ -239,33 +245,54 @@ function checkPods(workload: (typeof WORKLOADS)[number], list: unknown, pinned: 
   }
 }
 
+export interface ImagePullResult {
+  /** The image the Application pins, when its one image entry pins the registry image to a sha tag. */
+  pinned?: string;
+  mismatches: string[];
+  ok: string[];
+}
+
+/**
+ * Compare the Application (undefined when absent) and each workload's pod
+ * list (keyed by workload id, in the shape of a Kubernetes PodList) with the
+ * pinned registry image. Throws ReadError when a read is not the object or
+ * list it should be.
+ */
+export function checkImagePull(app: unknown, podLists: Readonly<Record<string, unknown>>): ImagePullResult {
+  const mismatches: string[] = [];
+  const ok: string[] = [];
+  let pinned: string | undefined;
+  if (app === undefined) {
+    mismatches.push(`Application ${APP.namespace}/${APP.name}: absent`);
+  } else if (!isRecord(app)) {
+    throw new ReadError(`kubectl get Application ${APP.namespace}/${APP.name} returned no object`);
+  } else {
+    pinned = checkApplication(app, mismatches);
+    if (pinned) ok.push(`Application ${APP.namespace}/${APP.name} pins ${pinned} and carries no ExternalSecret patch`);
+  }
+  for (const w of WORKLOADS) checkPods(w, podLists[w.id], pinned, mismatches, ok);
+  return { pinned, mismatches, ok };
+}
+
 function main(argv: string[]): number {
   if (argv.length > 0) {
     process.stderr.write("usage: node deploy/acr/check-image-pull.ts\n");
     return 2;
   }
-  const mismatches: string[] = [];
-  const ok: string[] = [];
+  let result: ImagePullResult;
   try {
     const app = kubectl(["get", "applications.argoproj.io", APP.name, "-n", APP.namespace, "-o", "json"]);
-    let pinned: string | undefined;
-    if (app === undefined) {
-      mismatches.push(`Application ${APP.namespace}/${APP.name}: absent`);
-    } else if (!isRecord(app)) {
-      throw new ReadError(`kubectl get Application ${APP.namespace}/${APP.name} returned no object`);
-    } else {
-      pinned = checkApplication(app, mismatches);
-      if (pinned) ok.push(`Application ${APP.namespace}/${APP.name} pins ${pinned} and carries no ExternalSecret patch`);
-    }
+    const podLists: Record<string, unknown> = {};
     for (const w of WORKLOADS) {
-      const list = kubectl(["get", "pods", "-n", NAMESPACE, "-l", `app.kubernetes.io/name=${w.label}`, "-o", "json"]);
-      checkPods(w, list, pinned, mismatches, ok);
+      podLists[w.id] = kubectl(["get", "pods", "-n", NAMESPACE, "-l", `app.kubernetes.io/name=${w.label}`, "-o", "json"]);
     }
+    result = checkImagePull(app, podLists);
   } catch (err) {
     if (!(err instanceof ReadError)) throw err;
     process.stderr.write(`${err.message}\n`);
     return 2;
   }
+  const { mismatches, ok } = result;
   if (mismatches.length > 0) {
     for (const m of mismatches) process.stderr.write(`${m}\n`);
     process.stderr.write(`${mismatches.length} mismatch(es) with the pinned ${REGISTRY_IMAGE} sha tag\n`);
@@ -275,4 +302,6 @@ function main(argv: string[]): number {
   return 0;
 }
 
-process.exitCode = main(process.argv.slice(2));
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  process.exitCode = main(process.argv.slice(2));
+}

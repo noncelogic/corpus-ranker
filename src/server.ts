@@ -3,11 +3,13 @@
 // of the frozen contract (contracts/openapi.json, TECH-STACK §1), as it grows.
 import { createServer as createHttpServer, type IncomingMessage, type Server } from "node:http";
 import { fileURLToPath } from "node:url";
+import { authenticate } from "./api/auth.ts";
 import { capture, type ApiResponse } from "./api/capture.ts";
+import { getPolicy } from "./api/policy-read.ts";
 import { DEFAULT_READINESS_TIMEOUT_MS, readiness } from "./api/readiness.ts";
 import { score } from "./api/score.ts";
 import { topN } from "./api/top-n.ts";
-import { BootConfigError, loadConfig, loadServiceConfig, type RankerConfig } from "./config.ts";
+import { BootConfigError, loadConfig, loadServiceConfig, type RankerConfig, type ServiceConfig } from "./config.ts";
 import { pgClient, type Db } from "./db/client.ts";
 import { s3ObjectStore, type ObjectStore } from "./storage/object-store.ts";
 
@@ -25,6 +27,7 @@ export interface ServerDeps {
 }
 
 const ORIGINALS = /^\/v1\/corpora\/([^/?#]+)\/originals$/;
+const POLICY_VERSION = /^\/v1\/policies\/([^/?#]+)\/versions\/([^/?#]+)$/;
 
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -35,11 +38,17 @@ function readBody(req: IncomingMessage): Promise<string> {
   });
 }
 
-export function createServer(config: RankerConfig, deps: ServerDeps = {}): Server {
+/**
+ * The server for `config`. Routes that require an API key (TECH-STACK §9)
+ * accept the keys in `config.apiKeys` (as `loadServiceConfig` reads them);
+ * without any, those routes refuse every request.
+ */
+export function createServer(config: RankerConfig & Partial<Pick<ServiceConfig, "apiKeys">>, deps: ServerDeps = {}): Server {
   const owned = deps.db ? undefined : pgClient(config.databaseUrl);
   const db = deps.db ?? owned!;
   const now = deps.now ?? (() => new Date());
   const store = deps.store ?? s3ObjectStore(config.objectStore);
+  const apiKeys = config.apiKeys ?? new Map<string, string>();
 
   const route = async (req: IncomingMessage): Promise<ApiResponse> => {
     const path = new URL(req.url ?? "/", "http://ranker").pathname;
@@ -58,6 +67,20 @@ export function createServer(config: RankerConfig, deps: ServerDeps = {}): Serve
         return { status: 400, body: { error: "invalid_corpus_id", message: "corpus_id is not valid percent-encoding" } };
       }
       return capture(corpusId, await readBody(req), { db, now, store });
+    }
+    const policyVersion = POLICY_VERSION.exec(path);
+    if (policyVersion && req.method === "GET") {
+      const auth = authenticate(req.headers, apiKeys);
+      if ("status" in auth) return auth;
+      let policyId: string;
+      let version: string;
+      try {
+        policyId = decodeURIComponent(policyVersion[1]!);
+        version = decodeURIComponent(policyVersion[2]!);
+      } catch {
+        return { status: 400, body: { error: "invalid_request", message: "path is not valid percent-encoding" } };
+      }
+      return getPolicy(policyId, version, { db });
     }
     if (req.method === "POST" && path === "/v1/scores") return score(await readBody(req), { db, now });
     if (req.method === "POST" && path === "/v1/top-n") return topN(await readBody(req), { db, now });

@@ -15,7 +15,9 @@ name: publish
 # at auth/jwt with role corpus-ranker-registry-push — bound to this repository,
 # refs/heads/main, push events and this workflow on main — reads the token and
 # logs docker in, all inside .github/scripts/estate-registry-credential.mjs,
-# which never prints the OIDC token, the OpenBao token or the password. No
+# which never prints the OIDC token, the OpenBao token or the password. That
+# runs as a preflight before the build, so each merge proves the live
+# credential path (or fails naming the unreachable step) first. No
 # GitHub token is used for the push, so the job holds no `packages`
 # permission; `id-token: write` only lets it mint the OIDC token. Plain docker
 # CLI; the only actions are GitHub's own checkout and setup-node. Publishing
@@ -47,32 +49,48 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+      # The self-hosted runner image has no node on PATH, and the credential
+      # preflight runs estate-registry-credential.mjs with it (every publish
+      # from 14095ff to d3fdce7 failed with `node: command not found`, so no
+      # sha-<commit> image reached the registry). Same pinned action and Node
+      # major as ci.yml. No cache: the job installs no packages.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+      # The credential preflight, before any build is spent: the one place
+      # the real GitHub OIDC endpoint, OpenBao and the registry are proven
+      # reachable with the production credential path. Pull requests run the
+      # same script only against stand-ins (tests/ci/registry-credential.test.ts),
+      # which proves its protocol, never live reachability; no pull-request
+      # job is given OPENBAO_ADDR or an OIDC token (CRANK-219). A failure
+      # names the step that could not be reached (oidc, openbao-login,
+      # openbao-read, registry-login).
+      - name: Registry credential preflight
+        env:
+          OPENBAO_ADDR: ${{ vars.OPENBAO_ADDR }}
+        run: |
+          # Private docker config per job, removed by the Log out step: no
+          # credential outlives this run on the shared self-hosted host.
+          export DOCKER_CONFIG="${RUNNER_TEMP}/docker-config"
+          mkdir -p "$DOCKER_CONFIG"
+          # OIDC -> OpenBao JWT role corpus-ranker-registry-push ->
+          # kv/data/corpus-ranker/acr-push -> docker login (password on
+          # stdin). Refuses a credential for any registry but the one IMAGE
+          # names.
+          EXPECTED_REGISTRY="${IMAGE%%/*}" node .github/scripts/estate-registry-credential.mjs
       - name: Build
         # The one build definition ci.yml's `image` job (DRY_RUN_OF: image)
         # proves on every pull request.
         run: |
           . .github/scripts/image-build.sh
           image_build "${IMAGE}:sha-${GITHUB_SHA}"
-      # The self-hosted runner image has no node on PATH, and Publish runs
-      # estate-registry-credential.mjs with it (every publish from 14095ff to
-      # d3fdce7 failed with `node: command not found`, so no sha-<commit>
-      # image reached the registry). Same pinned action and Node major as
-      # ci.yml. No cache: the job installs no packages.
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: 24
       - name: Publish
-        env:
-          OPENBAO_ADDR: ${{ vars.OPENBAO_ADDR }}
         run: |
-          registry="${IMAGE%%/*}"
-          # Private docker config per job: no credential outlives this run on
-          # the shared self-hosted host.
           export DOCKER_CONFIG="${RUNNER_TEMP}/docker-config"
-          mkdir -p "$DOCKER_CONFIG"
-          trap 'docker logout "$registry" >/dev/null 2>&1 || true; rm -rf "$DOCKER_CONFIG"' EXIT
-          # OIDC -> OpenBao JWT role corpus-ranker-registry-push ->
-          # kv/data/corpus-ranker/acr-push -> docker login (password on
-          # stdin). Refuses a credential for any registry but $registry.
-          EXPECTED_REGISTRY="$registry" node .github/scripts/estate-registry-credential.mjs
           docker push "${IMAGE}:sha-${GITHUB_SHA}"
+      - name: Log out
+        if: always()
+        run: |
+          export DOCKER_CONFIG="${RUNNER_TEMP}/docker-config"
+          docker logout "${IMAGE%%/*}" >/dev/null 2>&1 || true
+          rm -rf "$DOCKER_CONFIG"

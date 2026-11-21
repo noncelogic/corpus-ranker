@@ -20,13 +20,13 @@ import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
-import type { AddressInfo } from "node:net";
+import { createServer as createTcpServer, type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { readWorkflow, runEvent, type JobRun, type WorkflowEvent } from "./workflow-runner.ts";
+import { readWorkflow, runEvent, triggers, type JobRun, type WorkflowEvent } from "./workflow-runner.ts";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const workflowsDir = resolve(repoRoot, ".github", "workflows");
@@ -134,6 +134,8 @@ interface SimulateOptions {
   env?: Record<string, string>;
   /** Checkout to run in (default the repository itself); its .github/workflows are the ones run. */
   workspace?: string;
+  /** vars.OPENBAO_ADDR as the workflow sees it (default the stand-in estate). */
+  openbaoAddr?: string;
 }
 
 /**
@@ -193,7 +195,7 @@ async function simulate(t: TestContext, event: WorkflowEvent, estate: Estate, op
     event,
     workspace,
     repository: "noncelogic/corpus-ranker",
-    vars: { OPENBAO_ADDR: fake.url },
+    vars: { OPENBAO_ADDR: opts.openbaoAddr ?? fake.url },
     hostEnv: { PATH: `${bin}:${process.env.PATH}`, HOME: dir, REGISTRY_PUSH_DIR: decoy, ...opts.env },
     oidc: { url: `${fake.url}/oidc?api-version=2.0`, token: OIDC_REQUEST_TOKEN },
     onSecretRead: (name) => secretReads.push(name),
@@ -237,8 +239,8 @@ test("publish logs in through OpenBao JWT role corpus-ranker-registry-push and n
 
   // A push to main runs publish.yml as written: OIDC (audience openbao) ->
   // OpenBao JWT login with the bound role -> read the push token -> docker
-  // login to the registry it names, password on stdin -> push the SHA tag ->
-  // log out.
+  // login to the registry it names, password on stdin (the credential
+  // preflight) -> build -> push the SHA tag -> log out.
   const ok = await simulate(t, PUSH_MAIN, { creds: GOOD }, { workflows: ["publish.yml"] });
   const job = publishJob(ok);
   assert.equal(job.status, "success", ok.output);
@@ -248,12 +250,9 @@ test("publish logs in through OpenBao JWT role corpus-ranker-registry-push and n
   assert.ok(job.oidcOffered, "the job is granted id-token: write, so it can mint the OIDC token");
   assert.deepEqual(ok.requests, ["GET /oidc", "POST /v1/auth/jwt/login", `GET ${SECRET}`, "POST /v1/auth/token/revoke-self"]);
   assert.equal(ok.calls.length, 4, ok.calls.join("\n"));
-  assert.match(ok.calls[0]!, new RegExp(`^docker build .* -t ${IMAGE}:sha-${SHA} \\.$`), "builds the SHA-tagged image");
-  assert.deepEqual(ok.calls.slice(1), [
-    `docker login ${REGISTRY} -u corpus-ranker-push --password-stdin`,
-    `docker push ${IMAGE}:sha-${SHA}`,
-    `docker logout ${REGISTRY}`,
-  ]);
+  assert.equal(ok.calls[0], `docker login ${REGISTRY} -u corpus-ranker-push --password-stdin`);
+  assert.match(ok.calls[1]!, new RegExp(`^docker build .* -t ${IMAGE}:sha-${SHA} \\.$`), "builds the SHA-tagged image");
+  assert.deepEqual(ok.calls.slice(2), [`docker push ${IMAGE}:sha-${SHA}`, `docker logout ${REGISTRY}`]);
   assert.equal(ok.loginStdin, PASSWORD, "the fetched password reaches docker login on stdin");
   assert.doesNotMatch(ok.calls.join(" "), /mounted-/, "nothing from the runner mount is used");
   for (const secret of [PASSWORD, BAO_TOKEN, OIDC_JWT, OIDC_REQUEST_TOKEN]) {
@@ -276,7 +275,7 @@ test("publish logs in through OpenBao JWT role corpus-ranker-registry-push and n
   assert.ok(!wrong.output.includes(PASSWORD), "the password is not printed on refusal");
 });
 
-test("publish installs node before the Publish step runs the credential script on the node-less self-hosted runner", async (t) => {
+test("publish installs node before the credential preflight runs the credential script on the node-less self-hosted runner", async (t) => {
   // Red main 44693705144..44824828516: every publish since CR-PUBLISH-OIDC
   // failed on runner corpus-ranker-ci-aks-01 with `node: command not found`,
   // so no sha-<commit> image reached the registry for the rollout to pin.
@@ -284,8 +283,8 @@ test("publish installs node before the Publish step runs the credential script o
   const workflow = readWorkflow(resolve(workflowsDir, "publish.yml"));
   const steps = ((workflow.jobs as Record<string, { steps: { name?: string; uses?: string; with?: Record<string, unknown> }[] }>).image).steps;
   const setup = steps.findIndex((s) => String(s.uses ?? "").startsWith("actions/setup-node@"));
-  const publish = steps.findIndex((s) => s.name === "Publish");
-  assert.ok(setup >= 0 && setup < publish, "a pinned actions/setup-node step precedes Publish");
+  const preflight = steps.findIndex((s) => s.name === "Registry credential preflight");
+  assert.ok(setup >= 0 && setup < preflight, "a pinned actions/setup-node step precedes the credential preflight");
   assert.match(String(steps[setup]!.uses), /^actions\/setup-node@[0-9a-f]{40}$/, "setup-node is pinned to a commit");
   assert.equal(String(steps[setup]!.with?.["node-version"]), "24", "the same Node major as ci.yml and the image");
 
@@ -522,4 +521,96 @@ test("pull-request runs never contact OpenBao, and ci-result needs the image job
   };
   assert.equal(protection.required_status_checks.strict, true, "main's protection stays strict");
   assert.ok(protection.required_status_checks.contexts.includes("ci-result"), "ci-result stays the required check");
+});
+
+// CR-PUBLISH-CRED-PREFLIGHT acceptance: on a push to main, publish.yml runs
+// .github/scripts/estate-registry-credential.mjs against the real OIDC
+// endpoint, OpenBao and registry as a preflight before the image build, so
+// the merge itself is the proof that the estate credential path is live, and
+// a dead endpoint fails the run, naming the step, before a build is spent.
+// Pull requests run the same script only against stand-ins
+// (tests/ci/registry-credential.test.ts, under the pull-request `npm test`);
+// that proves the protocol, not reachability, and no pull-request job runs it
+// against the real endpoints (CRANK-219: that would cross the trust boundary
+// the tripwire test above enforces).
+const CREDENTIAL_SCRIPT = ".github/scripts/estate-registry-credential.mjs";
+
+test("publish.yml on main runs the credential preflight before the image build, and no pull-request job runs it against real endpoints", async (t) => {
+  type Step = { name?: string; uses?: string; run?: string; if?: string; env?: Record<string, string> };
+  const steps = (jobsOf("publish.yml").image as { steps: Step[] }).steps;
+  const at = (pred: (s: Step) => boolean, what: string): number => {
+    const i = steps.findIndex(pred);
+    assert.ok(i >= 0, `publish.yml/image has ${what}`);
+    return i;
+  };
+  const setup = at((s) => String(s.uses ?? "").startsWith("actions/setup-node@"), "a setup-node step");
+  const preflight = at((s) => s.name === "Registry credential preflight", "a Registry credential preflight step");
+  const build = at((s) => s.name === "Build", "a Build step");
+  const publish = at((s) => s.name === "Publish", "a Publish step");
+  assert.ok(setup < preflight && preflight < build && build < publish, "setup-node, then the preflight, then Build, then Publish");
+  assert.ok(steps[preflight]!.run!.includes(`node ${CREDENTIAL_SCRIPT}`), "the preflight runs the credential script");
+  assert.equal(steps[preflight]!.env?.OPENBAO_ADDR, "${{ vars.OPENBAO_ADDR }}", "against the real OpenBao the repository variable names");
+  assert.deepEqual(
+    steps.filter((s) => (s.run ?? "").includes(CREDENTIAL_SCRIPT)).map((s) => s.name),
+    ["Registry credential preflight"],
+    "the credential script runs once per publish, as the preflight",
+  );
+
+  // Run as written on a push to main: the credential is fetched and docker
+  // logged in before anything is built; the build and push follow.
+  const ok = await simulate(t, PUSH_MAIN, { creds: GOOD }, { workflows: ["publish.yml"] });
+  const job = publishJob(ok);
+  assert.equal(job.status, "success", ok.output);
+  assert.deepEqual(job.steps.map((s) => `${s.name} ${s.status}`).slice(preflight, publish + 1), [
+    "Registry credential preflight success",
+    "Build success",
+    "Publish success",
+  ]);
+  assert.deepEqual(ok.calls.map((c) => c.split(" ").slice(0, 2).join(" ")), ["docker login", "docker build", "docker push", "docker logout"]);
+  for (const s of ["oidc", "openbao-login", "openbao-read", "registry-login"]) {
+    assert.match(job.steps[preflight]!.output, new RegExp(`step ${s}: ok`), "the preflight log shows each step reached");
+  }
+
+  // OpenBao unreachable from the runner: the preflight fails naming the
+  // step, the image is never built and nothing is pushed.
+  // The dead address stays bound for the whole run by a listener that drops
+  // every connection it accepts, so no other listener (the simulation's own
+  // servers included) can take the port; it is closed once the run completes.
+  const gone = createTcpServer((socket) => socket.destroy());
+  await new Promise<void>((done) => gone.listen(0, "127.0.0.1", done));
+  const deadAddr = `http://127.0.0.1:${(gone.address() as AddressInfo).port}`;
+  let down: Simulation;
+  try {
+    down = await simulate(t, PUSH_MAIN, { creds: GOOD }, { workflows: ["publish.yml"], openbaoAddr: deadAddr });
+  } finally {
+    await new Promise<void>((done) => gone.close(() => done()));
+  }
+  const downJob = publishJob(down);
+  assert.equal(downJob.status, "failure", "an unreachable OpenBao fails the publish run");
+  assert.equal(downJob.steps[preflight]!.status, "failure");
+  assert.match(downJob.steps[preflight]!.output, /step openbao-login \(OpenBao auth\/jwt\/login .*\): could not be reached/, down.output);
+  assert.equal(downJob.steps[build]!.status, "skipped", "no build is spent after a failed preflight");
+  assert.equal(downJob.steps[publish]!.status, "skipped");
+  assert.deepEqual(down.calls.filter((c) => /^docker (build|login|push) /.test(c)), [], "nothing built, logged in to or pushed");
+
+  // Pull requests: no job any workflow runs for a pull request runs the
+  // credential script or is given the OpenBao address or an OIDC token. The
+  // only pull-request use of the script is the stand-in test under `npm
+  // test`, which addresses loopback stand-ins only and reads no endpoint or
+  // credential from the environment.
+  for (const file of readdirSync(workflowsDir).filter((f) => /\.ya?ml$/.test(f))) {
+    const wf = readWorkflow(resolve(workflowsDir, file));
+    if (!triggers(wf, PULL_REQUEST)) continue;
+    const text = readFileSync(resolve(workflowsDir, file), "utf8");
+    assert.ok(!text.includes("estate-registry-credential"), `${file} (pull request) does not run the credential script`);
+    assert.ok(!text.includes("OPENBAO_ADDR"), `${file} (pull request) is not given the OpenBao address`);
+  }
+  const pr = await simulate(t, PULL_REQUEST, { creds: GOOD, tripwires: true });
+  assert.ok(pr.jobs.every((j) => !j.oidcOffered), "no pull-request job can mint an OIDC token");
+  assert.deepEqual(pr.requests, [], "no pull-request job reaches the OIDC endpoint or OpenBao");
+  assert.deepEqual(pr.calls.filter((c) => /^docker (login|push|pull) /.test(c)), [], "no pull-request job logs in to the registry");
+  const standIns = readFileSync(resolve(repoRoot, "tests", "ci", "registry-credential.test.ts"), "utf8");
+  assert.doesNotMatch(standIns, /azurecr\.io/, "the stand-in test names no real registry");
+  assert.doesNotMatch(standIns, /process\.env\.(?!(?:PATH|DOCKER_CONFIG)\b)\w+/, "the stand-in test takes no endpoint or credential from the environment");
+  assert.doesNotMatch(standIns, /\bproves? (?:live )?reachability|live reachability is proven/i, "the stand-in test does not claim to prove reachability");
 });

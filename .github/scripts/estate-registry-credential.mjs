@@ -31,8 +31,8 @@
 // ATTEMPTS times with exponential backoff, and no new attempt starts past the
 // overall DEADLINE_MS. Each HTTP call stays bounded at TIMEOUT_MS (30 s) and
 // each docker login at the same. Only a transient fault is retried: the
-// endpoint unreachable or timed out, HTTP 408/429/5xx, or docker login
-// failing. A refusal (any other 4xx) or a malformed answer fails at once. A
+// endpoint unreachable or timed out (before or after the response headers),
+// HTTP 408/429/5xx, or docker login failing. A refusal (any other 4xx) or a malformed answer fails at once. A
 // failure that persists names its step and the attempts made.
 import { spawn } from "node:child_process";
 
@@ -106,8 +106,18 @@ function step(id, what) {
           await res.body?.cancel().catch(() => {});
           throw new AttemptError(`refused: HTTP ${res.status}`, isTransientStatus(res.status));
         }
+        // The body is read under the same 30-second signal. A connection
+        // dropped or timed out after the headers arrived is transient like
+        // one before them; only a body that arrived whole and does not parse
+        // is a malformed answer.
+        let text;
         try {
-          return await res.json();
+          text = await res.text();
+        } catch (err) {
+          throw new AttemptError(`response body could not be read (${err?.cause?.code ?? err?.cause?.message ?? err?.name ?? "error"})`, true);
+        }
+        try {
+          return JSON.parse(text);
         } catch {
           throw new AttemptError("response is not JSON", false);
         }

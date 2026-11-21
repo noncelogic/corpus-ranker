@@ -95,11 +95,17 @@ interface Down {
  * Transient faults: how many times each endpoint answers HTTP 503 before it
  * answers normally (the registry's 503 makes the stand-in docker login exit 1).
  * `openbaoReadHang` holds the secret read open without answering that many times.
+ * Faults after the headers arrive (HTTP 200 already sent): `openbaoReadTruncated`
+ * drops the connection mid-body, `openbaoReadBodyHang` holds the body open,
+ * `openbaoReadMalformed` sends a whole body that is not JSON.
  */
 interface Flaky {
   openbaoLogin?: number;
   openbaoRead?: number;
   openbaoReadHang?: number;
+  openbaoReadTruncated?: number;
+  openbaoReadBodyHang?: number;
+  openbaoReadMalformed?: number;
   registry?: number;
 }
 
@@ -151,6 +157,25 @@ async function runScript(t: TestContext, opts: Options = {}): Promise<Run> {
         return;
       }
       if (faulty("openbaoRead")) return send(res, 503, { errors: ["standby"] });
+      if (faulty("openbaoReadTruncated")) {
+        // Headers and part of the body, then the connection drops.
+        res.writeHead(200, { "Content-Type": "application/json", "Content-Length": "200" });
+        res.write('{"data": {"data": {');
+        setTimeout(() => req.socket.destroy(), 20);
+        return;
+      }
+      if (faulty("openbaoReadBodyHang")) {
+        // Headers and part of the body, then nothing more; announced like a hung request.
+        res.writeHead(200, { "Content-Type": "application/json", "Content-Length": "200" });
+        res.write('{"data": {"data": {', () => {
+          if (hungLog) setTimeout(() => appendFileSync(hungLog, `${path}\n`), 20);
+        });
+        return;
+      }
+      if (faulty("openbaoReadMalformed")) {
+        res.writeHead(200, { "Content-Type": "application/json" });
+        return res.end("<html>not json</html>");
+      }
       if (req.headers["x-vault-token"] !== BAO_TOKEN) return send(res, 403, { errors: ["permission denied"] });
       return send(res, 200, { data: { data: { registry, username: USERNAME, password: PASSWORD }, metadata: { version: 1 } } });
     }
@@ -340,6 +365,8 @@ test("a transient OpenBao or registry failure is retried within the bound and th
   for (const [flaky, step, request] of [
     [{ openbaoLogin: 2 }, "openbao-login", "openbao POST /v1/auth/jwt/login"],
     [{ openbaoRead: 1 }, "openbao-read", `openbao GET ${SECRET}`],
+    // HTTP 200 arrives, then the connection drops mid-body: still transient.
+    [{ openbaoReadTruncated: 2 }, "openbao-read", `openbao GET ${SECRET}`],
     [{ registry: 2 }, "registry-login", "registry GET /v2/"],
   ] as Array<[Flaky, string, string]>) {
     const failures = Object.values(flaky)[0]!;
@@ -363,6 +390,7 @@ test("a failure that persists past the retry bound exits non-zero naming the ope
   for (const [flaky, step, request] of [
     [{ openbaoLogin: 99 }, "openbao-login", "openbao POST /v1/auth/jwt/login"],
     [{ openbaoRead: 99 }, "openbao-read", `openbao GET ${SECRET}`],
+    [{ openbaoReadTruncated: 99 }, "openbao-read", `openbao GET ${SECRET}`],
     [{ registry: 99 }, "registry-login", "registry GET /v2/"],
   ] as Array<[Flaky, string, string]>) {
     const run = await runScript(t, { flaky });
@@ -370,7 +398,8 @@ test("a failure that persists past the retry bound exits non-zero naming the ope
     assert.equal(run.requests.filter((r) => r === request).length, ATTEMPTS, `${step}: attempted exactly ${ATTEMPTS} times`);
     const last = run.stderr.trim().split("\n").at(-1)!;
     assert.match(last, new RegExp(`^estate-registry-credential: step ${step} \\(.*\\): .*; gave up after ${ATTEMPTS} attempts`), last);
-    assert.match(last, step === "registry-login" ? /docker login exited 1/ : /HTTP 503/, last);
+    const reason = flaky.openbaoReadTruncated ? /response body could not be read/ : step === "registry-login" ? /docker login exited 1/ : /HTTP 503/;
+    assert.match(last, reason, last);
     if (step !== "registry-login") assert.ok(!run.requests.includes("registry GET /v2/"), "no registry login after a failed OpenBao step");
     assert.equal(run.dockerConfig, undefined);
     assertNoSecretPrinted(run);
@@ -382,6 +411,12 @@ test("a failure that persists past the retry bound exits non-zero naming the ope
   assert.deepEqual(refused.requests, ["oidc GET /oidc"], "a refusal (HTTP 401) is not retried");
   assert.match(refused.stderr.trim().split("\n").at(-1)!, /step oidc \(.*\): refused: HTTP 401; not retried \(1 attempt\)/);
 
+  // A whole body that is not JSON is a malformed answer, not a transient fault.
+  const malformed = await runScript(t, { flaky: { openbaoReadMalformed: 99 } });
+  assert.equal(malformed.code, 1);
+  assert.equal(malformed.requests.filter((r) => r === `openbao GET ${SECRET}`).length, 1, "a malformed body is not retried");
+  assert.match(malformed.stderr.trim().split("\n").at(-1)!, /step openbao-read \(.*\): response is not JSON; not retried \(1 attempt\)/);
+
   // The 30-second bound: a preload records the timeout every abort signal the
   // script asks for and leaves it in force (30 s), so no successful call can
   // time out under load. It stands in for that timer firing only on requests
@@ -391,26 +426,31 @@ test("a failure that persists past the retry bound exits non-zero naming the ope
   // call's) with a TimeoutError, exactly what AbortSignal.timeout gives.
   const dir = mkdtempSync(join(tmpdir(), "regcred-timeout-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
-  const log = join(dir, "timeouts");
-  const hungLog = join(dir, "hung");
-  writeFileSync(hungLog, "");
-  const preload = join(dir, "record-timeouts.mjs");
-  writeFileSync(
-    preload,
-    `import { appendFileSync, readFileSync } from "node:fs";\n` +
-      `const real = AbortSignal.timeout.bind(AbortSignal);\n` +
-      `let latest; let handled = 0;\n` +
-      `setInterval(() => {\n` +
-      `  const seen = readFileSync(${JSON.stringify(hungLog)}, "utf8").split("\\n").filter(Boolean).length;\n` +
-      `  for (; handled < seen; handled++) latest?.abort(new DOMException("The operation was aborted due to timeout", "TimeoutError"));\n` +
-      `}, 5).unref();\n` +
-      `AbortSignal.timeout = (ms) => {\n` +
-      `  appendFileSync(${JSON.stringify(log)}, ms + "\\n");\n` +
-      `  latest = new AbortController();\n` +
-      `  return AbortSignal.any([real(ms), latest.signal]);\n` +
-      `};\n`,
-  );
-  const hung = await runScript(t, { flaky: { openbaoReadHang: 99 }, hungLog, nodeArgs: ["--import", pathToFileURL(preload).href] });
+  /** Writes the preload for one scenario: `log` gets each bound asked for, `hungLog` announces held requests. */
+  const timeoutPreload = (name: string): { log: string; hungLog: string; nodeArgs: string[] } => {
+    const log = join(dir, `${name}-timeouts`);
+    const hungLog = join(dir, `${name}-hung`);
+    writeFileSync(hungLog, "");
+    const preload = join(dir, `${name}-record-timeouts.mjs`);
+    writeFileSync(
+      preload,
+      `import { appendFileSync, readFileSync } from "node:fs";\n` +
+        `const real = AbortSignal.timeout.bind(AbortSignal);\n` +
+        `let latest; let handled = 0;\n` +
+        `setInterval(() => {\n` +
+        `  const seen = readFileSync(${JSON.stringify(hungLog)}, "utf8").split("\\n").filter(Boolean).length;\n` +
+        `  for (; handled < seen; handled++) latest?.abort(new DOMException("The operation was aborted due to timeout", "TimeoutError"));\n` +
+        `}, 5).unref();\n` +
+        `AbortSignal.timeout = (ms) => {\n` +
+        `  appendFileSync(${JSON.stringify(log)}, ms + "\\n");\n` +
+        `  latest = new AbortController();\n` +
+        `  return AbortSignal.any([real(ms), latest.signal]);\n` +
+        `};\n`,
+    );
+    return { log, hungLog, nodeArgs: ["--import", pathToFileURL(preload).href] };
+  };
+  const { log, hungLog, nodeArgs } = timeoutPreload("headers");
+  const hung = await runScript(t, { flaky: { openbaoReadHang: 99 }, hungLog, nodeArgs });
   assert.equal(hung.code, 1, hung.stderr);
   assert.equal(hung.requests.filter((r) => r === `openbao GET ${SECRET}`).length, ATTEMPTS);
   assert.match(hung.stderr.trim().split("\n").at(-1)!, new RegExp(`step openbao-read \\(.*\\): could not be reached \\(TimeoutError\\); gave up after ${ATTEMPTS} attempts`));
@@ -419,6 +459,20 @@ test("a failure that persists past the retry bound exits non-zero naming the ope
   // oidc + login + 3 reads + revoke: every HTTP call carries the bound, and it is 30 seconds.
   assert.equal(bounds.length, 1 + 1 + ATTEMPTS + 1, `one bounded signal per HTTP call: ${bounds.join(",")}`);
   assert.deepEqual([...new Set(bounds)], [30_000], "each HTTP call is bounded at 30 seconds");
+
+  // The same bound covers the body: HTTP 200 arrives, then the body is held
+  // open; the 30-second signal aborts the body read, which is retried as a
+  // timeout up to the bound, not taken for a malformed answer.
+  const body = timeoutPreload("body");
+  const bodyHung = await runScript(t, { flaky: { openbaoReadBodyHang: 99 }, hungLog: body.hungLog, nodeArgs: body.nodeArgs });
+  assert.equal(bodyHung.code, 1, bodyHung.stderr);
+  assert.equal(bodyHung.requests.filter((r) => r === `openbao GET ${SECRET}`).length, ATTEMPTS);
+  assert.match(
+    bodyHung.stderr.trim().split("\n").at(-1)!,
+    new RegExp(`step openbao-read \\(.*\\): response body could not be read \\(TimeoutError\\); gave up after ${ATTEMPTS} attempts`),
+  );
+  assert.equal(readFileSync(body.hungLog, "utf8").trim().split("\n").length, ATTEMPTS, "each body was held open, then aborted");
+  assert.deepEqual([...new Set(readFileSync(body.log, "utf8").trim().split("\n").map(Number))], [30_000], "the body read is bounded at 30 seconds");
   // The docker login child is bounded at 30 seconds too (static: it is not an HTTP call the preload sees).
   assert.match(readFileSync(SCRIPT, "utf8"), /const TIMEOUT_MS = 30_000;/);
 });

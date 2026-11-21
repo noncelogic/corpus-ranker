@@ -1,0 +1,53 @@
+# Opt-in readback of the stored paper policy (cr_pol_paper v1). Never part of
+# normal Argo sync: deploy/kustomization.yaml does not include it; apply it by
+# hand in namespace corpus-ranker before the history import (job.yaml).
+#
+# Runs the importer's --check-policy mode, which reads the stored policy inside
+# a `set transaction read only` transaction and writes nothing. It prints one
+# JSON line: status absent or matching (exit 0: the import may proceed), or
+# differing with missing_allowed_scorers (exit 1: the deployed policy does not
+# admit juno:weekly-aggregation-triage); exit 2 on error. Needs only the
+# database URL: no export volume, no object-store credentials.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ranker-juno-policy-check
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ranker-juno-policy-check
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      imagePullSecrets:
+        - name: ranker-registry-pull
+      containers:
+        - name: check-policy
+          image: noncelogicci.azurecr.io/corpus-ranker
+          command: ["node", "dist/import/juno-historical-import.js", "--check-policy"]
+          env:
+            - name: RANKER_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: ranker-db-service
+                  key: uri
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi

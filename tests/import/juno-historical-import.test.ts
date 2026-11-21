@@ -3,6 +3,8 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { pgClient } from "../../src/db/client.ts";
 import { DAILY_FILE, importHistoricalExport, publishedPaperRubricV1, readHistoricalExport } from "../../src/import/juno-historical-import.ts";
@@ -140,4 +142,55 @@ test("a score by juno:weekly-aggregation-triage under the published paper-rubric
     fixture.psql("select count(*) from score_events where scorer->>'identity' = 'juno:weekly-aggregation-triage' and policy_id='cr_pol_paper' and policy_version=1"),
     "1",
   );
+});
+
+test("the policy check mode reports a stored paper-rubric v1 without juno:weekly-aggregation-triage as differing, reports a matching or absent policy as admissible, and writes no row", async (t) => {
+  const fixture = await freshDatabase(t);
+  const cli = fileURLToPath(new URL("../../src/import/juno-historical-import.ts", import.meta.url));
+  // Only RANKER_DATABASE_URL: no import directory, no object-store settings.
+  const env: Record<string, string> = { PATH: process.env.PATH ?? "", RANKER_DATABASE_URL: fixture.databaseUrl() };
+  function check() {
+    const run = spawnSync(process.execPath, [cli, "--check-policy"], { env, encoding: "utf8" });
+    const lines = run.stdout.trim().split("\n");
+    assert.equal(lines.length, 1, run.stdout + run.stderr);
+    return { code: run.status, report: JSON.parse(lines[0]!) as Record<string, unknown> };
+  }
+  const snapshot = () => fixture.psql(
+    "select count(*), coalesce(string_agg(md5(p::text), ',' order by id, version), '') from policies p",
+  ) + "|" + fixture.psql("select count(*) from corpora");
+
+  const empty = snapshot();
+  assert.deepEqual(check(), {
+    code: 0, report: { policy_id: "cr_pol_paper", policy_version: 1, status: "absent" },
+  });
+  assert.equal(snapshot(), empty);
+
+  const p = publishedPaperRubricV1;
+  fixture.psql(`insert into corpora (id,name,description,taxonomy_id,status)
+    values ('cr_corpus_papers','papers','Applied AI research papers','cr_tax_papers','active')`);
+  const withoutTriage = {
+    ...p.judge_config,
+    allowed_scorers: p.judge_config.allowed_scorers.filter((s) => s.identity !== "juno:weekly-aggregation-triage"),
+  };
+  const lit = (v: unknown) => `'${JSON.stringify(v).replaceAll("'", "''")}'::jsonb`;
+  fixture.psql(`insert into policies (id,version,name,corpus_id,dimensions,judge_config,composite_rule,created_by,created_at)
+    values ('${p.id}',${p.version},'${p.name}','${p.corpus_id}',${lit(p.dimensions)},${lit(withoutTriage)},
+      ${lit(p.composite_rule)},'${p.created_by}','${p.created_at}')`);
+  const stale = snapshot();
+  assert.deepEqual(check(), {
+    code: 1,
+    report: {
+      policy_id: "cr_pol_paper", policy_version: 1, status: "differing",
+      differing_fields: ["judge_config"],
+      missing_allowed_scorers: [{ kind: "program", identity: "juno:weekly-aggregation-triage" }],
+    },
+  });
+  assert.equal(snapshot(), stale);
+
+  fixture.psql(`update policies set judge_config = ${lit(p.judge_config)} where id='${p.id}' and version=${p.version}`);
+  const current = snapshot();
+  assert.deepEqual(check(), {
+    code: 0, report: { policy_id: "cr_pol_paper", policy_version: 1, status: "matching" },
+  });
+  assert.equal(snapshot(), current);
 });

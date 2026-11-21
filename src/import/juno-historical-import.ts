@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadContracts } from "../contracts/index.ts";
 import { pgClient, type Db } from "../db/client.ts";
-import { checkScore } from "../kernel/index.ts";
+import { checkScore, type Policy } from "../kernel/index.ts";
 import { s3ObjectStore, type ObjectStore } from "../storage/object-store.ts";
 import { verifyExport, WEEKLY_FILES } from "./corpus-import-job.ts";
 import { CorpusStore, importPapersJsonl, sha256, shortId, splitLines } from "./jsonl-importer.ts";
@@ -84,6 +84,42 @@ export function readHistoricalExport(dir: string, files = WEEKLY_FILES, daily = 
   return { records, corpus, events, rawByHash };
 }
 
+export interface PolicyCheck {
+  policy_id: string;
+  policy_version: number;
+  status: "absent" | "matching" | "differing";
+  differing_fields?: string[];
+  missing_allowed_scorers?: Policy["judge_config"]["allowed_scorers"];
+}
+
+/**
+ * Compare the stored paper-rubric v1 with the importer's publishedPaperRubricV1
+ * in a read-only transaction, using the same fields importHistoricalExport
+ * requires to match. Writes nothing to the database or the object store.
+ */
+export async function checkPaperPolicy(db: Db): Promise<PolicyCheck> {
+  const head = { policy_id: policy.id, policy_version: policy.version };
+  return db.transaction(async (tx) => {
+    await tx.query("set transaction read only");
+    const [row] = await tx.query<{ corpus_id: boolean; dimensions: boolean; judge_config: boolean; composite_rule: boolean; missing: Policy["judge_config"]["allowed_scorers"] }>(
+      `select corpus_id = $3 as corpus_id, dimensions = $4::jsonb as dimensions,
+        judge_config = $5::jsonb as judge_config, composite_rule = $6::jsonb as composite_rule,
+        (select coalesce(jsonb_agg(want order by ord), '[]'::jsonb)
+           from jsonb_array_elements($7::jsonb) with ordinality as w(want, ord)
+          where not exists (select 1 from jsonb_array_elements(
+            case when jsonb_typeof(judge_config->'allowed_scorers') = 'array' then judge_config->'allowed_scorers' else '[]'::jsonb end
+          ) as have where have = want)) as missing
+        from policies where id = $1 and version = $2`,
+      [policy.id, policy.version, corpusId, JSON.stringify(policy.dimensions), JSON.stringify(policy.judge_config),
+        JSON.stringify(policy.composite_rule), JSON.stringify(policy.judge_config.allowed_scorers)],
+    );
+    if (!row) return { ...head, status: "absent" };
+    const differing = (["corpus_id", "dimensions", "judge_config", "composite_rule"] as const).filter((f) => !row[f]);
+    if (!differing.length) return { ...head, status: "matching" };
+    return { ...head, status: "differing", differing_fields: differing, missing_allowed_scorers: row.missing };
+  });
+}
+
 export async function importHistoricalExport(dir: string, db: Db, store: ObjectStore, daily = false) {
   const files = daily ? [DAILY_FILE] : WEEKLY_FILES;
   const { records, corpus, events, rawByHash } = readHistoricalExport(dir, files, daily);
@@ -155,24 +191,39 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     if (!value) throw new Error(`${key} is required`);
     return value;
   }
-  const dir = required("RANKER_IMPORT_DIR");
-  const daily = process.argv.includes("--daily");
-  if (process.argv.includes("--check")) {
-    const { records, corpus, events } = readHistoricalExport(dir, daily ? [DAILY_FILE] : WEEKLY_FILES, daily);
-    console.log(JSON.stringify({ records, items: corpus.items().length, scores: events.length }));
-  } else {
+  if (process.argv.includes("--check-policy")) {
+    // Needs only the database: reads the stored policy, writes nothing.
     const db = pgClient(required("RANKER_DATABASE_URL"));
     try {
-      const store = s3ObjectStore({
-        endpoint: required("RANKER_S3_ENDPOINT"), bucket: required("RANKER_S3_BUCKET"),
-        accessKeyId: required("RANKER_S3_ACCESS_KEY_ID"), secretAccessKey: required("RANKER_S3_SECRET_ACCESS_KEY"),
-      });
-      console.log(JSON.stringify(await importHistoricalExport(dir, db, store, daily)));
+      const report = await checkPaperPolicy(db);
+      console.log(JSON.stringify(report));
+      process.exitCode = report.status === "differing" ? 1 : 0;
     } catch (error) {
-      console.error(`Historical import failed: ${error instanceof Error ? error.name : "unknown error"}`);
-      process.exitCode = 1;
+      console.error(`Policy check failed: ${error instanceof Error ? error.name : "unknown error"}`);
+      process.exitCode = 2;
     } finally {
       await db.end();
+    }
+  } else {
+    const dir = required("RANKER_IMPORT_DIR");
+    const daily = process.argv.includes("--daily");
+    if (process.argv.includes("--check")) {
+      const { records, corpus, events } = readHistoricalExport(dir, daily ? [DAILY_FILE] : WEEKLY_FILES, daily);
+      console.log(JSON.stringify({ records, items: corpus.items().length, scores: events.length }));
+    } else {
+      const db = pgClient(required("RANKER_DATABASE_URL"));
+      try {
+        const store = s3ObjectStore({
+          endpoint: required("RANKER_S3_ENDPOINT"), bucket: required("RANKER_S3_BUCKET"),
+          accessKeyId: required("RANKER_S3_ACCESS_KEY_ID"), secretAccessKey: required("RANKER_S3_SECRET_ACCESS_KEY"),
+        });
+        console.log(JSON.stringify(await importHistoricalExport(dir, db, store, daily)));
+      } catch (error) {
+        console.error(`Historical import failed: ${error instanceof Error ? error.name : "unknown error"}`);
+        process.exitCode = 1;
+      } finally {
+        await db.end();
+      }
     }
   }
 }

@@ -26,7 +26,7 @@ import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { createServer as createTcpServer, type AddressInfo, type Server } from "node:net";
 import { tmpdir } from "node:os";
@@ -109,6 +109,8 @@ interface Options {
   env?: Record<string, string>;
   /** Extra node flags for the script's process (e.g. --import of a recording preload). */
   nodeArgs?: string[];
+  /** A file the stand-in appends one line to each time it holds a request open (openbaoReadHang). */
+  hungLog?: string;
 }
 
 interface Run {
@@ -122,7 +124,7 @@ interface Run {
 }
 
 async function runScript(t: TestContext, opts: Options = {}): Promise<Run> {
-  const { down = {}, flaky = {}, env = {}, nodeArgs = [] } = opts;
+  const { down = {}, flaky = {}, env = {}, nodeArgs = [], hungLog } = opts;
   const requests: string[] = [];
   const seen: Record<string, number> = {};
   /** True while `key` is still inside its injected transient-fault count. */
@@ -143,7 +145,11 @@ async function runScript(t: TestContext, opts: Options = {}): Promise<Run> {
     }
     if (req.method === "GET" && path === SECRET) {
       if (down.openbaoRead) return req.socket.destroy();
-      if (faulty("openbaoReadHang")) return; // never answered
+      if (faulty("openbaoReadHang")) {
+        // Never answered; the request is already recorded, then announced.
+        if (hungLog) appendFileSync(hungLog, `${path}\n`);
+        return;
+      }
       if (faulty("openbaoRead")) return send(res, 503, { errors: ["standby"] });
       if (req.headers["x-vault-token"] !== BAO_TOKEN) return send(res, 403, { errors: ["permission denied"] });
       return send(res, 200, { data: { data: { registry, username: USERNAME, password: PASSWORD }, metadata: { version: 1 } } });
@@ -377,23 +383,38 @@ test("a failure that persists past the retry bound exits non-zero naming the ope
   assert.match(refused.stderr.trim().split("\n").at(-1)!, /step oidc \(.*\): refused: HTTP 401; not retried \(1 attempt\)/);
 
   // The 30-second bound: a preload records the timeout every abort signal the
-  // script asks for and scales it down 1000x, so a secret read that never
-  // answers is cut off by that bound (30 ms here, 30 s in production) on
-  // every attempt instead of waiting forever.
+  // script asks for and leaves it in force (30 s), so no successful call can
+  // time out under load. It stands in for that timer firing only on requests
+  // the stand-in has observed and deliberately held open: once the stand-in
+  // announces a hung request (after recording it), the preload aborts the
+  // latest signal (the script's calls are sequential, so that is the hung
+  // call's) with a TimeoutError, exactly what AbortSignal.timeout gives.
   const dir = mkdtempSync(join(tmpdir(), "regcred-timeout-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const log = join(dir, "timeouts");
+  const hungLog = join(dir, "hung");
+  writeFileSync(hungLog, "");
   const preload = join(dir, "record-timeouts.mjs");
   writeFileSync(
     preload,
-    `import { appendFileSync } from "node:fs";\n` +
+    `import { appendFileSync, readFileSync } from "node:fs";\n` +
       `const real = AbortSignal.timeout.bind(AbortSignal);\n` +
-      `AbortSignal.timeout = (ms) => { appendFileSync(${JSON.stringify(log)}, ms + "\\n"); return real(Math.ceil(ms / 1000)); };\n`,
+      `let latest; let handled = 0;\n` +
+      `setInterval(() => {\n` +
+      `  const seen = readFileSync(${JSON.stringify(hungLog)}, "utf8").split("\\n").filter(Boolean).length;\n` +
+      `  for (; handled < seen; handled++) latest?.abort(new DOMException("The operation was aborted due to timeout", "TimeoutError"));\n` +
+      `}, 5).unref();\n` +
+      `AbortSignal.timeout = (ms) => {\n` +
+      `  appendFileSync(${JSON.stringify(log)}, ms + "\\n");\n` +
+      `  latest = new AbortController();\n` +
+      `  return AbortSignal.any([real(ms), latest.signal]);\n` +
+      `};\n`,
   );
-  const hung = await runScript(t, { flaky: { openbaoReadHang: 99 }, nodeArgs: ["--import", pathToFileURL(preload).href] });
+  const hung = await runScript(t, { flaky: { openbaoReadHang: 99 }, hungLog, nodeArgs: ["--import", pathToFileURL(preload).href] });
   assert.equal(hung.code, 1, hung.stderr);
   assert.equal(hung.requests.filter((r) => r === `openbao GET ${SECRET}`).length, ATTEMPTS);
   assert.match(hung.stderr.trim().split("\n").at(-1)!, new RegExp(`step openbao-read \\(.*\\): could not be reached \\(TimeoutError\\); gave up after ${ATTEMPTS} attempts`));
+  assert.equal(readFileSync(hungLog, "utf8").trim().split("\n").length, ATTEMPTS, "each attempt was held open, then aborted");
   const bounds = readFileSync(log, "utf8").trim().split("\n").map(Number);
   // oidc + login + 3 reads + revoke: every HTTP call carries the bound, and it is 30 seconds.
   assert.equal(bounds.length, 1 + 1 + ATTEMPTS + 1, `one bounded signal per HTTP call: ${bounds.join(",")}`);

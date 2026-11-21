@@ -2,20 +2,26 @@
 // or deploy file does not type-check, so a broken test double cannot pass as
 // green.
 //
-// Culprit: 1b72a50418639c1e4835cb761b2fbb6f4e7deda8 (PR #70, CR-D1-PROMOTE).
-// It made `ping(signal?)` a required member of `ObjectStore`
-// (src/storage/object-store.ts) for the API's readiness probe, but did not
-// update the hand-written store stub in
-// tests/import/juno-historical-import.test.ts (added by #61), which had only
-// put/get/uri. The stub's `importHistoricalExport(dir, db, store)` call then
-// failed `tsc` with TS2345, and `ci` on main went red (run 44791735363).
-// PR #74 added `async ping() {}` to the stub; no product code was missing it.
+// Culprit: 1b72a50418639c1e4835cb761b2fbb6f4e7deda8 (PR #70, CR-D1-PROMOTE),
+// the only commit in 84a8611..1b72a50. It made `ping(signal?)` a required
+// member of `ObjectStore` (src/storage/object-store.ts) for the API's
+// readiness probe and added `ping` to the one store stub its base (50201b1)
+// had, in tests/import/juno-historical-import.test.ts.
 //
-// Why pull-request checks missed it: they did not. PR #70's first head
-// (b7ced0e) passed, and its final head (2227924, which added ping) failed
-// `npm run typecheck` with this exact error (run 44775866705). The PR was
-// merged red anyway, because GitHub's protection on main does not yet
-// require the declared `ci-result` check (devops/github/branch-protection.json;
+// Root cause: a semantic merge race. While #70 was open, #71 (ba98ffb,
+// merged 16:07Z) added a second hand-written stub to the same file with
+// only put/get/uri. Each change type-checked against its own base; together
+// the stub's `importHistoricalExport(dir, db, store)` call failed `tsc` with
+// TS2345 at line 124, and `ci` on main went red (run 44791735363). PR #74
+// added `async ping() {}` to that stub; no product code was missing it.
+//
+// Why pull-request checks missed it: they did not miss it; the merge was not
+// gated on them. PR #70's run on its first head (b7ced0e, run 44745432161)
+// passed because #71 was not on main yet. The run on its final head
+// (2227924, run 44775866705, tested on top of a main that had #71) failed
+// `npm run typecheck` with this exact error. The PR was merged red anyway at
+// 18:19Z, because GitHub's protection on main does not yet require the
+// declared `ci-result` check (devops/github/branch-protection.json;
 // tests/deploy/ci-gate.test.ts records that main currently reports no
 // required checks). Applying that protection is a repository setting for the
 // DevOps route (Rule: policies/placement-defaults.yaml#credentials,

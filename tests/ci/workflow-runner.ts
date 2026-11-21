@@ -2,7 +2,9 @@
 // workflow files in .github/workflows as written, for one event, the way the
 // hosted service does for the parts these workflows use:
 //
-//   - trigger matching (`on: push` with `branches`, `on: pull_request`);
+//   - trigger matching (`on: push` with `branches`, `on: pull_request`,
+//     `on: workflow_dispatch` with `inputs`), and the inputs context as
+//     `inputs.<name>` (the dispatch's input values; empty for other events);
 //   - job ordering by `needs`, job and step `if:` expressions, including the
 //     status functions success(), failure(), always() and cancelled() (an
 //     `if:` without one is implicitly `success() && ...`), and the needs
@@ -38,10 +40,12 @@ import { parseYamlDocs, type Yaml } from "../deploy/render.ts";
 type Map_ = { [key: string]: Yaml };
 
 export interface WorkflowEvent {
-  name: "push" | "pull_request";
+  name: "push" | "pull_request" | "workflow_dispatch";
   /** e.g. refs/heads/main, or refs/pull/1/merge */
   ref: string;
   sha: string;
+  /** workflow_dispatch input values, by input name. */
+  inputs?: Record<string, string>;
 }
 
 export interface RunnerOptions {
@@ -94,7 +98,7 @@ export function triggers(workflow: Map_, event: WorkflowEvent): boolean {
   const filter = isMap(on) ? on[event.name] : null;
   if (!isMap(filter)) return true;
   for (const key of Object.keys(filter)) {
-    if (!["branches", "types"].includes(key)) throw new Error(`unsupported trigger filter ${event.name}.${key}`);
+    if (event.name === "workflow_dispatch" ? key !== "inputs" : !["branches", "types"].includes(key)) throw new Error(`unsupported trigger filter ${event.name}.${key}`);
   }
   if (filter.branches === undefined) return true;
   if (event.name !== "push") throw new Error("branch filters are supported for push only");
@@ -136,6 +140,7 @@ function operand(raw: string, ctx: Context): string | boolean {
     "github.repository": ctx.repository,
   };
   if (s in github) return github[s]!;
+  if ((m = /^inputs\.([A-Za-z_][\w-]*)$/.exec(s))) return ctx.event.inputs?.[m[1]!] ?? "";
   if (s === "always()") return true;
   if (s === "cancelled()") return false;
   if (s === "success()" || s === "failure()") {

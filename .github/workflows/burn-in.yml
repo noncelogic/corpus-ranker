@@ -1,0 +1,44 @@
+name: burn-in
+
+# Proves new or changed tests deterministic before they merge (policy
+# tests-burn-in-before-merge): the conductor dispatches this on a pull
+# request's head with the test files to prove and how many times to run each;
+# .github/scripts/burn-in.sh runs each file that many times, with no retries,
+# and fails at the first failing run. It runs on the runner ci.yml's test job
+# uses (GitHub-hosted, docs/EXTERNAL-REVIEW.md §1) with a read-only token and
+# no secrets. The inputs reach the script through env only, never
+# interpolated into script text. It is not part of ci-result or the required
+# checks: whether its result blocks a merge is the conductor's call.
+on:
+  workflow_dispatch:
+    inputs:
+      tests:
+        description: Repository test file paths (tests/**/*.test.ts), separated by spaces or newlines
+        required: true
+        type: string
+      repeat:
+        description: How many times to run each file (a positive integer)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  burn-in:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Burn in
+        env:
+          TESTS: ${{ inputs.tests }}
+          REPEAT: ${{ inputs.repeat }}
+        run: bash .github/scripts/burn-in.sh

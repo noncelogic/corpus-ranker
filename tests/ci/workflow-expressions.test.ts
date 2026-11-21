@@ -35,6 +35,7 @@ const SHA = "0".repeat(40);
 const EVENTS: WorkflowEvent[] = [
   { name: "push", ref: "refs/heads/main", sha: SHA },
   { name: "pull_request", ref: "refs/pull/1/merge", sha: SHA },
+  { name: "workflow_dispatch", ref: "refs/heads/main", sha: SHA, inputs: {} },
 ];
 const STATUSES = [
   { success: true, failure: false },

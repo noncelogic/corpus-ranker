@@ -11,6 +11,8 @@ import { paperRubricV1 } from "./paper-rubric.ts";
 import { readDimensionScores, readScoredAt, readScorer } from "./score-import.ts";
 
 const corpusId = "cr_corpus_papers";
+/** The scorer the historical import's scores are recorded under (deploy/import/job.yaml). */
+export const IMPORT_SCORER = "juno:weekly-aggregation-triage";
 const importer = "agent:juno-historical-import";
 export const DAILY_FILE = "papers-daily.jsonl";
 export const publishedPaperRubricV1 = paperRubricV1({
@@ -24,10 +26,46 @@ export const publishedPaperRubricV1 = paperRubricV1({
     { kind: "program", identity: "unknown" },
     // The corpus import Job's declared scorer (deploy/import/job.yaml,
     // RANKER_IMPORT_DECLARED_SCORER) for records that name none (CRANK-238).
-    { kind: "program", identity: "juno:weekly-aggregation-triage" },
+    { kind: "program", identity: IMPORT_SCORER },
   ],
 });
 const policy = publishedPaperRubricV1;
+
+/** The stored policy version the import scores under does not admit the import scorer. */
+export class ImportPolicyDeniedError extends Error {
+  override name = "ImportPolicyDeniedError";
+  readonly policyId: string;
+  readonly policyVersion: number;
+  readonly scorer: string;
+  constructor(policyId: string, policyVersion: number, scorer: string) {
+    super(`Stored policy ${policyId} version ${policyVersion} does not admit scorer ${scorer} in judge_config.allowed_scorers; refusing the import`);
+    this.policyId = policyId;
+    this.policyVersion = policyVersion;
+    this.scorer = scorer;
+  }
+}
+
+/**
+ * Read the stored version of the policy the historical import scores under and
+ * refuse, before any capture, when its allowed_scorers do not admit the import
+ * scorer. Read-only: a stored version is immutable once cited (SPEC A2.6), so
+ * this never edits it. An absent version is admissible; the import creates it.
+ */
+export async function assertStoredPolicyAdmitsImportScorer(db: Db): Promise<void> {
+  const [row] = await db.transaction(async (tx) => {
+    await tx.query("set transaction read only");
+    return tx.query<{ allowed: unknown }>(
+      "select judge_config->'allowed_scorers' as allowed from policies where id = $1 and version = $2",
+      [policy.id, policy.version],
+    );
+  });
+  if (!row) return;
+  // Same admission rule as the kernel's checkScore: a scorer is admitted by identity.
+  const admitted = Array.isArray(row.allowed) && row.allowed.some(
+    (a) => typeof a === "object" && a !== null && (a as { identity?: unknown }).identity === IMPORT_SCORER,
+  );
+  if (!admitted) throw new ImportPolicyDeniedError(policy.id, policy.version, IMPORT_SCORER);
+}
 
 export function readHistoricalExport(dir: string, files = WEEKLY_FILES, daily = false) {
   verifyExport(dir, files);
@@ -122,6 +160,9 @@ export async function checkPaperPolicy(db: Db): Promise<PolicyCheck> {
 
 export async function importHistoricalExport(dir: string, db: Db, store: ObjectStore, daily = false) {
   const files = daily ? [DAILY_FILE] : WEEKLY_FILES;
+  // Historical (weekly) runs: refuse before reading or capturing anything when
+  // the stored policy version would deny the import scorer (CRANK-263).
+  if (!daily) await assertStoredPolicyAdmitsImportScorer(db);
   const { records, corpus, events, rawByHash } = readHistoricalExport(dir, files, daily);
   const originals = corpus.originals();
   const items = corpus.items();
@@ -219,7 +260,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
         });
         console.log(JSON.stringify(await importHistoricalExport(dir, db, store, daily)));
       } catch (error) {
-        console.error(`Historical import failed: ${error instanceof Error ? error.name : "unknown error"}`);
+        if (error instanceof ImportPolicyDeniedError) console.error(`Historical import failed: ${error.name}: ${error.message}`);
+        else console.error(`Historical import failed: ${error instanceof Error ? error.name : "unknown error"}`);
         process.exitCode = 1;
       } finally {
         await db.end();

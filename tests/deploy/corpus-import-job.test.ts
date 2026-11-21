@@ -25,13 +25,14 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
-import { join, relative, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { score as scoreHandler } from "../../src/api/score.ts";
 import { loadContracts, openapiUri } from "../../src/contracts/index.ts";
 import type { Queryable } from "../../src/db/client.ts";
 import { runCorpusImport } from "../../src/import/corpus-import-job.ts";
 import { paperRubricV1 } from "../../src/import/paper-rubric.ts";
-import { deployDir, kustomizeBuild, parseYamlDocs, renderObjects, repoRoot, type K8sObject } from "./render.ts";
+import { renderOptInJob } from "../../deploy/opt-in-job.ts";
+import { deployDir, parseYamlDocs, renderObjects, repoRoot, type K8sObject } from "./render.ts";
 
 const NAMESPACE = "corpus-ranker";
 const JOB = "ranker-corpus-import";
@@ -49,18 +50,9 @@ interface Container {
   volumeMounts?: Array<{ name: string; mountPath: string; readOnly?: boolean }>;
 }
 
-/** Render deploy/import as a component of a throwaway overlay, as an operator applies it. */
+/** Render deploy/import through its documented path (deploy/opt-in-job.ts), as an operator applies it. */
 function renderComponent(): K8sObject[] {
-  const dir = mkdtempSync(join(tmpdir(), "cr-import-overlay-"));
-  try {
-    writeFileSync(
-      join(dir, "kustomization.yaml"),
-      `apiVersion: kustomize.config.k8s.io/v1beta1\nkind: Kustomization\nnamespace: ${NAMESPACE}\ncomponents:\n  - ${relative(dir, resolve(deployDir, "import"))}\n`,
-    );
-    return parseYamlDocs(kustomizeBuild(dir)) as unknown as K8sObject[];
-  } finally {
-    rmSync(dir, { recursive: true, force: true });
-  }
+  return parseYamlDocs(renderOptInJob("corpus-import", "sha-535bf267131c58c223a3577c770fe4bb1a4b9528")) as unknown as K8sObject[];
 }
 
 const containersOf = (job: K8sObject): { init: Container[]; main: Container[] } => ({
@@ -296,7 +288,7 @@ test("the rendered import Job mounts juno-papers-export read-only, checks SHA256
   assert.equal(envOf(importer!, "RANKER_API_URL")?.value, `http://ranker-api.${NAMESPACE}.svc.cluster.local:8080`, "posts to the ranker-api Service");
   assert.match(envOf(importer!, "RANKER_CORPUS_ID")?.value ?? "", /^cr_corpus_[A-Za-z0-9]+$/);
   assert.deepEqual(envOf(importer!, "RANKER_API_KEY")?.valueFrom, { secretKeyRef: { name: "ranker-api-keys", key: "joe" } }, "the API key comes from the ranker-api-keys Secret");
-  assert.match(importer!.image, /^noncelogicci\.azurecr\.io\/corpus-ranker(:|@)/, "runs the ranker image");
+  assert.equal(importer!.image, "noncelogicci.azurecr.io/corpus-ranker:sha-535bf267131c58c223a3577c770fe4bb1a4b9528", "runs the published ranker image");
 
   // --- Not part of the normal sync -------------------------------------------
   assert.deepEqual(

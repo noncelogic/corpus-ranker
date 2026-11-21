@@ -3,14 +3,13 @@
 #
 # A kustomize Component, deliberately not listed in deploy/kustomization.yaml:
 # a normal Argo CD sync never renders or runs it. An operator runs it once
-# (CRANK-95), from an overlay that sets the namespace and includes it:
+# (CRANK-95), rendered with the published sha-<commit> image tag:
 #
-#   # kustomization.yaml
-#   apiVersion: kustomize.config.k8s.io/v1beta1
-#   kind: Kustomization
-#   namespace: corpus-ranker
-#   components:
-#     - <path to>/deploy/import
+#   node deploy/opt-in-job.ts corpus-import sha-<40-hex commit> | kubectl apply -n corpus-ranker -f -
+#
+# which includes it in a throwaway overlay setting the namespace and the
+# ranker image's newTag. The component names no tag of its own: publish.yml
+# pushes only sha-<commit>, never a moving tag such as :main.
 #
 # tests/deploy/corpus-import-job.test.ts holds the Job.
 apiVersion: kustomize.config.k8s.io/v1alpha1
@@ -21,7 +20,3 @@ labels:
     includeSelectors: false
 resources:
   - job.yaml
-images:
-  # As deploy/kustomization.yaml: the tag estate-side GitOps rolls out.
-  - name: noncelogicci.azurecr.io/corpus-ranker
-    newTag: main

@@ -1,6 +1,10 @@
 # Opt-in readback of the stored paper policy (cr_pol_paper v1). Never part of
 # normal Argo sync: deploy/kustomization.yaml does not include it; apply it by
-# hand in namespace corpus-ranker before the history import (job.yaml).
+# hand in namespace corpus-ranker before the history import (job.yaml), with
+# the same published image tag as that import:
+#
+#   node deploy/opt-in-job.ts policy-check sha-<40-hex commit> | kubectl apply -n corpus-ranker -f -
+#
 #
 # Runs the importer's --check-policy mode, which reads the stored policy inside
 # a `set transaction read only` transaction and writes nothing. It prints one

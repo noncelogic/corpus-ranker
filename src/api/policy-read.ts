@@ -13,13 +13,19 @@ export interface PolicyReadDeps {
 }
 
 const POLICY_ID = /^cr_pol_[A-Za-z0-9]+$/;
-const VERSION = /^[1-9][0-9]{0,8}$/;
+const VERSION = /^[1-9][0-9]*$/;
+// policies.version is a Postgres integer (db/migrations/0001_corpus_model.sql), so no stored
+// version can exceed this; a larger, contract-valid version is simply not found.
+const MAX_STORED_VERSION = 2_147_483_647;
 const error = (status: number, code: string, message: string): ApiResponse => ({ status, body: { error: code, message } });
 
 /** Handle GET /v1/policies/{policy_id}/versions/{version} with already-decoded path parameters. */
 export async function getPolicy(policyId: string, rawVersion: string, deps: PolicyReadDeps): Promise<ApiResponse> {
   if (!POLICY_ID.test(policyId)) return error(400, "invalid_request", "policy_id is not a policy id (cr_pol_...)");
   if (!VERSION.test(rawVersion)) return error(400, "invalid_request", "version is not a positive integer");
+  if (rawVersion.length > 10 || Number(rawVersion) > MAX_STORED_VERSION) {
+    return error(404, "policy_not_found", `policy ${policyId} has no version ${rawVersion}`);
+  }
   const version = Number(rawVersion);
 
   const [row] = await deps.db.query<{ policy: Policy }>(

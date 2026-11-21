@@ -100,6 +100,9 @@ test("refuses an unknown policy id or version with the contract's not-found erro
   for (const [name, id, version] of [
     ["unknown version", v1.id, 3],
     ["unknown policy", "cr_pol_nosuch", 1],
+    ["absent ten-digit version", v1.id, 1000000001],
+    ["version beyond the stored integer range", v1.id, 2147483648],
+    ["version far beyond the stored integer range", v1.id, "123456789012345678901234567890"],
   ] as const) {
     const res = await getPolicy(id, version);
     assert.equal(res.status, 404, name);
@@ -107,6 +110,12 @@ test("refuses an unknown policy id or version with the contract's not-found erro
     assert.deepEqual(contracts.registry.validate(body, ERROR), [], name);
     assert.equal(body.error, "policy_not_found", name);
   }
+  // A large version the contract and the database allow is read, not refused.
+  const big: Policy = { ...v1, version: 1000000000 };
+  db.psql(insert(big));
+  const found = await getPolicy(v1.id, 1000000000);
+  assert.equal(found.status, 200);
+  assert.deepEqual(await found.json(), big);
   for (const [name, id, version] of [
     ["malformed id", "not-a-policy", 1],
     ["version zero", v1.id, 0],

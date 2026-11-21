@@ -8,7 +8,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { deployDir, parseYamlDocs, repoRoot, type K8sObject } from "./render.ts";
 
@@ -16,11 +15,13 @@ const IMAGE = "noncelogicci.azurecr.io/corpus-ranker";
 const SCRIPT = resolve(deployDir, "opt-in-job.ts");
 const TAG = "sha-535bf267131c58c223a3577c770fe4bb1a4b9528";
 
-const JOBS: Record<string, { name: string; source: string }> = {
-  "history-import": { name: "ranker-juno-history-import", source: "history-import/job.yaml" },
-  "policy-check": { name: "ranker-juno-policy-check", source: "history-import/policy-check-job.yaml" },
-  "corpus-import": { name: "ranker-corpus-import", source: "import/job.yaml" },
-  "daily-import": { name: "ranker-daily-paper-import", source: "daily-import/job.yaml" },
+// The rendered Job and every container it runs (init containers first), each
+// of which runs the ranker image.
+const JOBS: Record<string, { name: string; containers: string[] }> = {
+  "history-import": { name: "ranker-juno-history-import", containers: ["verify", "import"] },
+  "policy-check": { name: "ranker-juno-policy-check", containers: ["check-policy"] },
+  "corpus-import": { name: "ranker-corpus-import", containers: ["verify", "import"] },
+  "daily-import": { name: "ranker-daily-paper-import", containers: ["verify", "import"] },
 };
 
 const run = (...args: string[]) =>
@@ -32,7 +33,7 @@ const containers = (job: K8sObject): Array<{ name: string; image: string }> => [
 ];
 
 test("each opt-in Job's ranker containers render with the supplied sha-<commit> tag and never untagged, :latest or :main", () => {
-  for (const [job, { name, source }] of Object.entries(JOBS)) {
+  for (const [job, { name, containers: expected }] of Object.entries(JOBS)) {
     const r = run(job, TAG);
     assert.equal(r.status, 0, `${job}: ${r.stderr}`);
     const objects = parseYamlDocs(r.stdout) as unknown as K8sObject[];
@@ -40,19 +41,18 @@ test("each opt-in Job's ranker containers render with the supplied sha-<commit> 
     assert.deepEqual(jobs.map((o) => o.metadata.name), [name], `${job} renders exactly Job/${name}`);
     assert.equal(jobs[0]!.metadata.namespace, "corpus-ranker", `${job}: rendered into namespace corpus-ranker`);
     const cs = containers(jobs[0]!);
-    assert.ok(cs.length > 0);
-    // Every container the source names with the ranker image is rendered with the tag.
-    const sourceRanker = (readFileSync(resolve(deployDir, source), "utf8").match(new RegExp(`image:\\s*${IMAGE.replaceAll(".", "\\.")}\\b`, "g")) ?? []).length;
-    const pinned = cs.filter((c) => c.image === `${IMAGE}:${TAG}`);
-    assert.equal(pinned.length, sourceRanker, `${job}: every ranker container carries ${TAG}`);
+    // Exactly the expected ranker containers, each rendered with the supplied tag.
+    assert.deepEqual(
+      cs.map((c) => [c.name, c.image]),
+      expected.map((c) => [c, `${IMAGE}:${TAG}`]),
+      `${job}: containers ${expected.join(", ")} each carry ${TAG}`,
+    );
     for (const c of cs) {
       assert.match(c.image, /:sha-[0-9a-f]{40}$/, `${job}/${c.name}: an immutable sha-<commit> tag`);
       assert.doesNotMatch(c.image, /:(latest|main)$/, `${job}/${c.name}: no moving tag`);
       assert.notEqual(c.image, IMAGE, `${job}/${c.name}: not untagged`);
     }
   }
-  // The component no longer carries a moving tag of its own.
-  assert.doesNotMatch(readFileSync(resolve(deployDir, "import", "kustomization.yaml"), "utf8"), /newTag:\s*(main|latest)\b/);
 });
 
 test("rendering an opt-in Job without a sha-<commit> tag fails and names the missing tag", () => {

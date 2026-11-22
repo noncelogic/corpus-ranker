@@ -3,10 +3,14 @@
 // `openbao` ClusterSecretStore logs in with, add-only, and read the result
 // back (CRANK-188; Rule: policies/placement-defaults.yaml#estate secrets):
 //
-//   node deploy/openbao/attach-eso.ts
+//   node deploy/openbao/attach-eso.ts [devops/openbao/kubernetes-roles/eso-obs[.<name>].attach.json]
 //
-// devops/openbao/kubernetes-roles/eso-obs.attach.json names the auth mount,
-// the role (eso-obs on mount kubernetes) and the policies to add, each with
+// With no argument it applies devops/openbao/kubernetes-roles/eso-obs.attach.json;
+// given another eso-obs attach manifest beside it (eso-obs.acr-pull.attach.json,
+// the ACR pull grant), it applies that one the same way. Any other argument is
+// a usage error.
+//
+// The manifest names the auth mount, the role (eso-obs on mount kubernetes) and the policies to add, each with
 // its file in devops/openbao/policies/. Each file must itself grant read on
 // exactly one kv/corpus-ranker/<purpose> path, a different one per policy, and
 // nothing else (no wildcard, list, write or metadata); a file that does not is
@@ -45,7 +49,7 @@ import { readFileSync } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
 import { resolve } from "node:path";
 import { bao, quote, ReadError } from "./policy-grants.ts";
-import { readManifest, repoRoot } from "./eso-attach-manifest.ts";
+import { MANIFEST_ARG, manifestArg, readManifest, repoRoot } from "./eso-attach-manifest.ts";
 
 type RoleData = Record<string, unknown>;
 
@@ -88,14 +92,15 @@ function otherSettings(data: RoleData): RoleData {
 }
 
 function main(argv: string[]): number {
-  if (argv.length > 0) {
-    process.stderr.write("usage: node deploy/openbao/attach-eso.ts\n");
+  const manifest = manifestArg(argv);
+  if (manifest === undefined) {
+    process.stderr.write(`usage: node deploy/openbao/attach-eso.ts ${MANIFEST_ARG}\n`);
     return 2;
   }
   const drift: string[] = [];
   let record: Record<string, unknown>;
   try {
-    const attach = readManifest();
+    const attach = readManifest(manifest);
     const rolePath = `auth/${attach.authMount}/role/${attach.role}`;
     const at = `role ${rolePath}`;
 

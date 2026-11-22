@@ -118,10 +118,32 @@ function* assignments(needs: string[]): Generator<Record<string, Result>> {
 }
 
 /**
+ * A `needs` context that is wholly unknown: reading any need, or enumerating
+ * them (`needs.*`, as in contains(needs.*.result, 'success')), throws.
+ */
+const unknownNeeds = (): Record<string, never> =>
+  new Proxy({} as Record<string, never>, {
+    get(_t, key) {
+      if (typeof key === "symbol") return undefined;
+      throw new Error(`needs.${key} is not known to the exclusion probe`);
+    },
+    has(_t, key) {
+      throw new Error(`needs.${String(key)} is not known to the exclusion probe`);
+    },
+    ownKeys() {
+      throw new Error("needs is not enumerable in the exclusion probe");
+    },
+    getOwnPropertyDescriptor(_t, key) {
+      throw new Error(`needs.${String(key)} is not known to the exclusion probe`);
+    },
+  });
+
+/**
  * Whether the job's `if` excludes a push to main whatever its needs end with:
- * it reads no needs and is falsy under every combination of the status
- * functions' inputs (failed, cancelled). An `if` that reads a need, or that
- * cannot be evaluated, is not an exclusion.
+ * it reads no needs (not even by enumerating them with `needs.*`) and is falsy
+ * under every combination of the status functions' inputs (failed,
+ * cancelled). An `if` that reads or enumerates a need, or that cannot be
+ * evaluated, is not an exclusion.
  */
 function excludesPushToMain(raw: Yaml | undefined): boolean {
   if (typeof raw !== "string") return raw === false;
@@ -129,7 +151,7 @@ function excludesPushToMain(raw: Yaml | undefined): boolean {
   try {
     for (const failed of [false, true]) {
       for (const cancelled of [false, true]) {
-        const { value } = evaluate(src, { github: githubContext(PUSH_MAIN), needs: known("needs", {}), status: { failed, cancelled } });
+        const { value } = evaluate(src, { github: githubContext(PUSH_MAIN), needs: unknownNeeds(), status: { failed, cancelled } });
         if (!(value === false || value === null || value === 0 || value === "")) return false;
       }
     }

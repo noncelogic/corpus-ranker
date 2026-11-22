@@ -148,6 +148,16 @@ test("a pull_request-only job with more needs than are enumerated is still not c
   assertRefused(pushToo, /`preview`.*not in ci-result's needs/, "seven-need job whose if admits push");
 });
 
+test("an if that enumerates needs (needs.*) is not taken as excluding push to main", () => {
+  // `audit` runs on main whenever `test` succeeds; the exclusion probe must not
+  // read needs.* as an empty list and conclude the job never runs.
+  for (const cond of ["contains(needs.*.result, 'success')", "${{ always() && contains(needs.*.result, 'success') }}"]) {
+    const w = ciYml();
+    jobs(w).audit = pushJob({ needs: "test", if: cond });
+    assertRefused(w, /`audit`.*not in ci-result's needs/, `unneeded audit job with if: ${cond}`);
+  }
+});
+
 test("ci-result does not list itself, and the gate does not ask it to", () => {
   const w = ciYml();
   assert.ok(!(resultJob(w).needs as string[]).includes(RESULT_JOB));

@@ -11,9 +11,11 @@
 //     not run it when a needed job failed (no always() / !cancelled()): a
 //     skipped required check reads as passing;
 //   - a job that runs on push to main (no job-level `if`, or one that admits a
-//     push to main under any outcome of its needs; an `if` that excludes push
-//     without reading its needs is honoured first, however many needs it has) is absent from ci-result's
-//     `needs`; each such job is named.
+//     push to main under any outcome of its needs; an `if` that is false on
+//     push whatever its needs end with -- e.g. github.event_name ==
+//     'pull_request' && contains(needs.*.result, 'success') -- is honoured
+//     first, however many needs it has) is absent from ci-result's `needs`;
+//     each such job is named.
 //
 // It decides from structured fields only: `on:`, the job ids declared under
 // `jobs:`, and each job's `if:` and `needs:`. Comments, step names and run
@@ -138,27 +140,108 @@ const unknownNeeds = (): Record<string, never> =>
     },
   });
 
+/** A truth value the probe may not know: true, false, or unknown (null). */
+type Tri = boolean | null;
+
+/**
+ * Split `src` at its top-level occurrences of `op` (outside strings and
+ * parentheses); one part when `op` does not occur at the top level.
+ */
+function splitTop(src: string, op: "&&" | "||"): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i];
+    if (c === "'") {
+      for (i++; i < src.length; i++) {
+        if (src[i] === "'" && src[i + 1] === "'") i++;
+        else if (src[i] === "'") break;
+      }
+    } else if (c === "(" || c === "[") depth++;
+    else if (c === ")" || c === "]") depth--;
+    else if (depth === 0 && src.startsWith(op, i)) {
+      parts.push(src.slice(start, i).trim());
+      i += op.length - 1;
+      start = i + 1;
+    }
+  }
+  parts.push(src.slice(start).trim());
+  return parts;
+}
+
+/** The inside of `src` when one pair of parentheses encloses all of it. */
+function enclosed(src: string): string | undefined {
+  return src.startsWith("(") && src.endsWith(")") && balancedInside(src) ? src.slice(1, -1).trim() : undefined;
+}
+/** Whether the opening parenthesis at 0 closes only at the last character. */
+function balancedInside(src: string): boolean {
+  let depth = 0;
+  for (let i = 0; i < src.length; i++) {
+    const c = src[i];
+    if (c === "'") {
+      for (i++; i < src.length; i++) {
+        if (src[i] === "'" && src[i + 1] === "'") i++;
+        else if (src[i] === "'") break;
+      }
+    } else if (c === "(") depth++;
+    else if (c === ")" && --depth === 0 && i !== src.length - 1) return false;
+  }
+  return depth === 0;
+}
+
+/**
+ * The truth of `src` on a push to main with these status inputs, in
+ * three-valued (Kleene) logic over its top-level `||`, `&&`, `!( )` and
+ * parentheses: a part that reads or enumerates a need, or that cannot be
+ * evaluated, is unknown, and unknown && false is false, unknown || true is
+ * true. So `github.event_name == 'pull_request' && contains(needs.*.result,
+ * 'success')` is false on a push, whatever its needs end with.
+ */
+function probe(src: string, status: { failed: boolean; cancelled: boolean }): Tri {
+  const ors = splitTop(src, "||");
+  if (ors.length > 1) {
+    const vs = ors.map((s) => probe(s, status));
+    return vs.includes(true) ? true : vs.includes(null) ? null : false;
+  }
+  const ands = splitTop(src, "&&");
+  if (ands.length > 1) {
+    const vs = ands.map((s) => probe(s, status));
+    return vs.includes(false) ? false : vs.includes(null) ? null : true;
+  }
+  const inner = enclosed(src);
+  if (inner !== undefined) return probe(inner, status);
+  if (src.startsWith("!") && !src.startsWith("!=")) {
+    const negated = enclosed(src.slice(1).trim());
+    if (negated !== undefined) {
+      const v = probe(negated, status);
+      return v === null ? null : !v;
+    }
+  }
+  try {
+    const { value } = evaluate(src, { github: githubContext(PUSH_MAIN), needs: unknownNeeds(), status });
+    return !(value === false || value === null || value === 0 || value === "");
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Whether the job's `if` excludes a push to main whatever its needs end with:
- * it reads no needs (not even by enumerating them with `needs.*`) and is falsy
- * under every combination of the status functions' inputs (failed,
- * cancelled). An `if` that reads or enumerates a need, or that cannot be
- * evaluated, is not an exclusion.
+ * it is false (not merely unknown) under every combination of the status
+ * functions' inputs (failed, cancelled), where any part of it that reads or
+ * enumerates a need (`needs.*`), or that cannot be evaluated, is unknown. An
+ * `if` whose falsity on push depends on a need is not an exclusion.
  */
 function excludesPushToMain(raw: Yaml | undefined): boolean {
   if (typeof raw !== "string") return raw === false;
   const src = raw.trim().replace(/^\$\{\{([\s\S]*)\}\}$/, "$1").trim();
-  try {
-    for (const failed of [false, true]) {
-      for (const cancelled of [false, true]) {
-        const { value } = evaluate(src, { github: githubContext(PUSH_MAIN), needs: unknownNeeds(), status: { failed, cancelled } });
-        if (!(value === false || value === null || value === 0 || value === "")) return false;
-      }
+  for (const failed of [false, true]) {
+    for (const cancelled of [false, true]) {
+      if (probe(src, { failed, cancelled }) !== false) return false;
     }
-    return true;
-  } catch {
-    return false;
   }
+  return true;
 }
 
 /** Whether main runs this job on a push, under any outcome of its needs. */

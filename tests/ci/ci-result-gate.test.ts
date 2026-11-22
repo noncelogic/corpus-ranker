@@ -148,6 +148,33 @@ test("a pull_request-only job with more needs than are enumerated is still not c
   assertRefused(pushToo, /`preview`.*not in ci-result's needs/, "seven-need job whose if admits push");
 });
 
+test("a pull_request-only job whose if also reads or enumerates its needs is still not counted as running on main", () => {
+  // Seven needs (above the enumeration cutoff): the event clause alone makes
+  // the if false on a push, whatever the needs part would evaluate to.
+  const needs = ["n1", "n2", "n3", "n4", "n5", "n6", "n7"];
+  for (const cond of [
+    "github.event_name == 'pull_request' && contains(needs.*.result, 'success')",
+    "contains(needs.*.result, 'success') && github.event_name == 'pull_request'",
+    "${{ always() && github.event_name == 'pull_request' && (needs.n1.result == 'success' || contains(needs.*.result, 'failure')) }}",
+    "github.event_name == 'pull_request' && needs.n1.outputs.changed == 'true'",
+  ]) {
+    const w = ciYml();
+    for (const n of needs) jobs(w)[n] = pushJob({ if: "github.event_name == 'pull_request'" });
+    jobs(w).preview = pushJob({ needs, if: cond });
+    assertAllowed(w, `seven-need pull_request-only preview job (if: ${cond})`);
+  }
+  // A needs clause that can make the if true on push is not an exclusion.
+  for (const cond of [
+    "github.event_name == 'pull_request' || contains(needs.*.result, 'success')",
+    "!(github.event_name == 'push' && contains(needs.*.result, 'failure'))",
+  ]) {
+    const w = ciYml();
+    for (const n of needs) jobs(w)[n] = pushJob({ if: "github.event_name == 'pull_request'" });
+    jobs(w).preview = pushJob({ needs, if: cond });
+    assertRefused(w, /`preview`.*not in ci-result's needs/, `seven-need job whose if may run on push (if: ${cond})`);
+  }
+});
+
 test("an if that enumerates needs (needs.*) is not taken as excluding push to main", () => {
   // `audit` runs on main whenever `test` succeeds; the exclusion probe must not
   // read needs.* as an empty list and conclude the job never runs.

@@ -322,3 +322,132 @@ test("eso-obs attach readback: run against a real OpenBao holding eso-obs with a
   assert.equal(replaced.code, 1, replaced.output);
   for (const name of ATTACHED) assert.match(replaced.stderr, new RegExp(`token_policies: "${name}" is declared .* but absent`));
 });
+
+// CR-M3-D2-ACRPULL-READBACK acceptance: the ranker's ACR pull grant is declared in its own attach manifest,
+// devops/openbao/kubernetes-roles/eso-obs.acr-pull.attach.json (CR-M3-D2-ACRPULL). The same checker, given
+// that manifest, reads back role eso-obs on mount kubernetes and that one policy, and checks the role holds
+// external-secrets-corpus-ranker-acr-pull beside its other policies and the stored text grants read on
+// kv/corpus-ranker/acr-pull alone, exactly as devops/openbao/policies/external-secrets-corpus-ranker-acr-pull.hcl.
+const ACR_MANIFEST = "devops/openbao/kubernetes-roles/eso-obs.acr-pull.attach.json";
+const ACR = "external-secrets-corpus-ranker-acr-pull";
+const ACR_FILE = `devops/openbao/policies/${ACR}.hcl`;
+const acrAttach = JSON.parse(readFileSync(resolve(repoRoot, ACR_MANIFEST), "utf8")) as {
+  auth_mount: string;
+  role: string;
+  mode: string;
+  add_token_policies: Array<{ name: string; file: string }>;
+};
+
+function runCheckerWith(pathPrefix: string, args: string[], script = checker) {
+  const r = spawnSync(process.execPath, [script, ...args], {
+    encoding: "utf8",
+    cwd: tmpdir(),
+    env: { PATH: `${pathPrefix}:${process.env.PATH}`, HOME: process.env.HOME ?? "/tmp" },
+  });
+  if (r.error) throw r.error;
+  return { code: r.status, stdout: r.stdout, stderr: r.stderr, output: `${r.stdout}${r.stderr}` };
+}
+
+test("the readback checks the ACR pull policy attachment declared in eso-obs.acr-pull.attach.json against the role and the policy file", (t) => {
+  assert.equal(acrAttach.auth_mount, "kubernetes");
+  assert.equal(acrAttach.role, "eso-obs");
+  assert.equal(acrAttach.mode, "add");
+  assert.deepEqual(acrAttach.add_token_policies, [{ name: ACR, file: ACR_FILE }]);
+  const acrText = readFileSync(resolve(repoRoot, ACR_FILE), "utf8");
+  const estatePolicies = ["default", OTHER, ...ATTACHED, ACR];
+
+  // The role holds the ACR pull policy beside its other policies, the stored text equals the file: exit 0,
+  // having read the role and that one policy only (no other policy, no secret path).
+  const bao = fakeBao(t, { policies: { ...declaredPolicies(), [ACR]: acrText }, role: roleRead(estatePolicies) });
+  const ok = runCheckerWith(bao.dir, [ACR_MANIFEST]);
+  assert.equal(ok.code, 0, ok.output);
+  assert.match(ok.stdout, new RegExp(`role ${ROLE_PATH}: token_policies include ${ACR}\\n`));
+  assert.match(ok.stdout, new RegExp(`policy ${ACR} matches ${ACR_FILE.replace(/\./g, "\\.")}\\n`));
+  assert.deepEqual(bao.calls().trim().split("\n").sort(), [`policy read ${ACR}`, `read -format=json ${ROLE_PATH}`]);
+  for (const other of [OTHER, MINIO, KEYS]) assert.doesNotMatch(ok.output, new RegExp(`${other}\\b(?!-acr-pull)`));
+
+  // The same policy written tersely: the same grant.
+  const terse = runCheckerWith(fakeBao(t, {
+    policies: { [ACR]: `path "kv/data/corpus-ranker/acr-pull" { capabilities = ["read"] }` },
+    role: roleRead([OTHER, ACR]),
+  }).dir, [ACR_MANIFEST]);
+  assert.equal(terse.code, 0, terse.output);
+
+  // Drift is named against the ACR pull manifest.
+  const cases: Array<{ name: string; policies: Record<string, string>; role?: string; drift: RegExp }> = [
+    { name: "detached", policies: { [ACR]: acrText }, role: roleRead(["default", OTHER, ...ATTACHED]),
+      drift: new RegExp(`^role ${ROLE_PATH}: token_policies: "${ACR}" is declared in devops/openbao/kubernetes-roles/eso-obs\\.acr-pull\\.attach\\.json but absent$`, "m") },
+    { name: "absent policy", policies: {}, role: roleRead([OTHER, ACR]), drift: new RegExp(`^policy ${ACR}: absent$`, "m") },
+    { name: "list added", policies: { [ACR]: `path "kv/data/corpus-ranker/acr-pull" {\n  capabilities = ["read", "list"]\n}\n` }, role: roleRead([OTHER, ACR]),
+      drift: new RegExp(`^policy ${ACR}: path kv/data/corpus-ranker/acr-pull: capability "list" is not declared$`, "m") },
+    { name: "another path", policies: { [ACR]: `${acrText}\npath "kv/data/corpus-ranker/api-keys" {\n  capabilities = ["read"]\n}\n` }, role: roleRead([OTHER, ACR]),
+      drift: new RegExp(`^policy ${ACR}: path kv/data/corpus-ranker/api-keys is not declared`, "m") },
+    { name: "wildcard", policies: { [ACR]: `path "kv/data/corpus-ranker/*" {\n  capabilities = ["read"]\n}\n` }, role: roleRead([OTHER, ACR]),
+      drift: new RegExp(`policy ${ACR}: path kv/data/corpus-ranker/\\* is not declared \\(wildcard\\)`) },
+    { name: "absent role", policies: { [ACR]: acrText }, drift: new RegExp(`^role ${ROLE_PATH}: absent$`, "m") },
+  ];
+  for (const c of cases) {
+    const r = runCheckerWith(fakeBao(t, { policies: c.policies, role: c.role }).dir, [ACR_MANIFEST]);
+    assert.equal(r.code, 1, `${c.name}: expected exit 1\n${r.output}`);
+    assert.match(r.stderr, c.drift, `${c.name}: the drift is not named\n${r.stderr}`);
+    assert.match(r.stderr.trim().split("\n").at(-1)!, /difference\(s\) from devops\/openbao\/kubernetes-roles\/eso-obs\.acr-pull\.attach\.json$/);
+    assert.doesNotMatch(r.stderr, new RegExp(OTHER), c.name);
+  }
+
+  // Only an eso-obs attach manifest in devops/openbao/kubernetes-roles/ is accepted, and one at most: anything
+  // else is a usage error (exit 2) before OpenBao is read.
+  for (const args of [["devops/openbao/kubernetes-roles/corpus-ranker-api-keys.json"], ["/etc/passwd"], ["devops/openbao/kubernetes-roles/../../../package.json"], [ACR_MANIFEST, ACR_MANIFEST]]) {
+    const refused = fakeBao(t, { policies: { [ACR]: acrText }, role: roleRead([OTHER, ACR]) });
+    const r = runCheckerWith(refused.dir, args);
+    assert.equal(r.code, 2, `${args.join(" ")}: ${r.output}`);
+    assert.match(r.stderr, /usage: node deploy\/openbao\/check-eso-attach\.ts \[devops\/openbao\/kubernetes-roles\/eso-obs\[\.<name>\]\.attach\.json\]/);
+    assert.equal(refused.calls(), "", "nothing was read");
+  }
+});
+
+test("eso-obs ACR pull attach readback: applied add-only from main to a real OpenBao whose eso-obs already holds the ACR pull policy, nothing is written and the readback passes", { timeout: 300_000 }, async (t) => {
+  const bao = await startDevOpenBao(t);
+  bao.root("auth", "enable", "kubernetes");
+  // The role as the estate holds it (readback 2026-11-20): its own policy, the ranker's two, and the ACR pull grant.
+  docker(["exec", bao.name, "sh", "-c", `printf 'path "kv/data/other/thing" {\\n  capabilities = ["read"]\\n}\\n' > /tmp/other.hcl`]);
+  bao.root("policy", "write", OTHER, "/tmp/other.hcl");
+  docker(["cp", resolve(repoRoot, ACR_FILE), `${bao.name}:/tmp/${ACR}.hcl`]);
+  bao.root("policy", "write", ACR, `/tmp/${ACR}.hcl`);
+  const estate = [OTHER, ACR];
+  bao.root("write", ROLE_PATH, "bound_service_account_names=external-secrets", "bound_service_account_namespaces=external-secrets", `token_policies=${estate.join(",")}`, "token_ttl=20m");
+  const roleBefore = JSON.parse(bao.root("read", "-format=json", ROLE_PATH)).data;
+
+  const dir = mkdtempSync(join(tmpdir(), "dev-bao-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  writeFileSync(join(dir, "bao"), `#!/bin/sh\nexec docker exec -i -e BAO_ADDR=http://127.0.0.1:8200 -e BAO_TOKEN=root ${bao.name} bao "$@"\n`);
+  chmodSync(join(dir, "bao"), 0o755);
+
+  // The DevOps apply from main with the ACR pull manifest: add-only, the policy already stored byte-identical
+  // and attached, so nothing is written.
+  const applied = runCheckerWith(dir, [ACR_MANIFEST], resolve(deployDir, "openbao", "attach-eso.ts"));
+  assert.equal(applied.code, 0, applied.output);
+  const record = JSON.parse(applied.stdout.trim().split("\n").at(-1)!);
+  assert.deepEqual(record.appended, []);
+  assert.deepEqual(record.policies_written, []);
+  assert.deepEqual(record.token_policies_after, estate);
+  assert.equal(record.settings_preserved, true);
+  assert.deepEqual(Object.keys(record.policy_sha256), [ACR]);
+  assert.deepEqual(JSON.parse(bao.root("read", "-format=json", ROLE_PATH)).data, roleBefore, "the role is untouched");
+
+  const ok = runCheckerWith(dir, [ACR_MANIFEST]);
+  assert.equal(ok.code, 0, ok.output);
+  assert.match(ok.stdout, new RegExp(`token_policies include ${ACR}`));
+  assert.match(ok.stdout, new RegExp(`policy ${ACR} matches ${ACR_FILE.replace(/\./g, "\\.")}`));
+
+  // Detached by a replace: the readback names it.
+  bao.root("write", ROLE_PATH, `token_policies=${OTHER}`);
+  const detached = runCheckerWith(dir, [ACR_MANIFEST]);
+  assert.equal(detached.code, 1, detached.output);
+  assert.match(detached.stderr, new RegExp(`token_policies: "${ACR}" is declared in ${ACR_MANIFEST.replace(/\./g, "\\.")} but absent`));
+
+  // The apply re-attaches it after the role's own policy, add-only; the readback passes again.
+  const healed = runCheckerWith(dir, [ACR_MANIFEST], resolve(deployDir, "openbao", "attach-eso.ts"));
+  assert.equal(healed.code, 0, healed.output);
+  assert.deepEqual(JSON.parse(bao.root("read", "-format=json", ROLE_PATH)).data.token_policies, [OTHER, ACR]);
+  assert.equal(runCheckerWith(dir, [ACR_MANIFEST]).code, 0);
+});

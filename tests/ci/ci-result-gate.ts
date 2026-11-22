@@ -17,14 +17,17 @@
 // It decides from structured fields only: `on:`, the job ids declared under
 // `jobs:`, and each job's `if:` and `needs:`. Comments, step names and run
 // scripts are never read. Job `if:` expressions are evaluated with the
-// workflow emulator's evaluator (tests/deploy/workflow-runner.ts); one it
-// cannot evaluate is treated as admitting push, so it must be needed.
+// workflow emulator's evaluator (tests/deploy/workflow-runner.ts) under every
+// combination of results of the job's needs (success, failure, cancelled,
+// skipped); one it cannot evaluate, or one that reads a value not known before
+// the run (a need's outputs, an undeclared need, an unmodelled github field),
+// is treated as admitting push, so it must be needed.
 // checkRepoCiResultGate(root) applies it to <root>/.github/workflows/ci.yml;
 // other workflow files are out of scope.
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { parseYamlDocs, type Yaml } from "../deploy/render.ts";
-import { evaluate, triggers, type WorkflowEvent } from "../deploy/workflow-runner.ts";
+import { evaluate, triggers, type Result, type WorkflowEvent } from "../deploy/workflow-runner.ts";
 
 export type Workflow = { [key: string]: Yaml };
 type Obj = { [key: string]: Yaml };
@@ -37,39 +40,91 @@ const PULL_REQUEST: WorkflowEvent = { name: "pull_request", ref: "refs/pull/1/me
 
 const isObj = (v: Yaml | undefined): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v);
 
-const githubContext = (event: WorkflowEvent) => ({
-  event_name: event.name,
-  ref: event.ref,
-  base_ref: event.baseRef ?? "",
-  head_ref: event.name === "pull_request" ? "feature" : "",
-  ref_name: event.ref.replace(/^refs\/(heads|tags)\//, ""),
-});
+/**
+ * A context object whose unlisted properties are unknown, not null: reading
+ * one throws, so the caller treats the expression as not evaluable.
+ */
+function known<T extends object>(what: string, values: T): T {
+  return new Proxy(values, {
+    get(target, key, receiver) {
+      if (typeof key === "symbol" || key === "toJSON" || Object.hasOwn(target, key)) return Reflect.get(target, key, receiver);
+      throw new Error(`${what}.${key} is not known before the run`);
+    },
+  });
+}
 
-type Outcome = "success" | "failure" | "cancelled";
+const githubContext = (event: WorkflowEvent) =>
+  known("github", {
+    event_name: event.name,
+    ref: event.ref,
+    base_ref: event.baseRef ?? "",
+    head_ref: event.name === "pull_request" ? "feature" : "",
+    ref_name: event.ref.replace(/^refs\/(heads|tags)\//, ""),
+  });
+
+const RESULTS = ["success", "failure", "cancelled", "skipped"] as const satisfies readonly Result[];
+/** Above this many needs the outcomes are not enumerated; the job is assumed to run. */
+const MAX_ENUMERATED_NEEDS = 6;
+
+/** The `needs` context for these results; outputs (and undeclared needs) are unknown. */
+const needsContext = (results: Record<string, Result>) => {
+  const ctx: Record<string, { result: Result; outputs: Record<string, never> }> = {};
+  for (const [id, result] of Object.entries(results)) {
+    ctx[id] = known(`needs.${id}`, {
+      result,
+      outputs: new Proxy({} as Record<string, never>, {
+        get(_t, key) {
+          if (typeof key === "symbol") return undefined;
+          throw new Error(`needs.${id}.outputs.${key} is not known before the run`);
+        },
+        ownKeys() {
+          throw new Error(`needs.${id}.outputs is not known before the run`);
+        },
+      }),
+    });
+  }
+  return known("needs", ctx);
+};
 
 /**
  * Whether a job-level `if` runs the job for this event when its needs ended
- * with `outcome`. GitHub wraps an `if` with no status function in success().
- * Throws when the expression cannot be evaluated.
+ * with `results`. As in GitHub (and the workflow runner), an `if` with no
+ * status function is wrapped in success() and a needed job that did not
+ * succeed stops it. Throws when the expression cannot be evaluated, including
+ * when it reads a context value not known before the run.
  */
-function admits(raw: Yaml | undefined, event: WorkflowEvent, outcome: Outcome): boolean {
-  const status = { failed: outcome === "failure", cancelled: outcome === "cancelled" };
-  const green = !status.failed && !status.cancelled;
+function admits(raw: Yaml | undefined, event: WorkflowEvent, results: Record<string, Result>): boolean {
+  const outcomes = Object.values(results);
+  const status = { failed: outcomes.includes("failure"), cancelled: outcomes.includes("cancelled") };
+  const green = outcomes.every((r) => r === "success");
   if (raw === undefined || raw === null) return green;
   if (typeof raw === "boolean") return raw && green;
   if (typeof raw !== "string") throw new Error(`unsupported if: ${JSON.stringify(raw)}`);
   const src = raw.trim().replace(/^\$\{\{([\s\S]*)\}\}$/, "$1").trim();
-  const { value, usesStatus } = evaluate(src, { github: githubContext(event), needs: {}, status });
+  const { value, usesStatus } = evaluate(src, { github: githubContext(event), needs: needsContext(results), status });
   const truthy = !(value === false || value === null || value === 0 || value === "");
   return usesStatus ? truthy : truthy && green;
 }
 
+/** Every assignment of a result to each of these needs. */
+function* assignments(needs: string[]): Generator<Record<string, Result>> {
+  if (needs.length === 0) {
+    yield {};
+    return;
+  }
+  const [first, ...rest] = needs;
+  for (const tail of assignments(rest)) for (const r of RESULTS) yield { [first!]: r, ...tail };
+}
+
 /** Whether main runs this job on a push, under any outcome of its needs. */
 function runsOnPushToMain(job: Obj): boolean {
+  const needs = needsOf(job);
+  if (needs.length > MAX_ENUMERATED_NEEDS) return true; // Too many outcomes to check: assume it runs, so ci-result must need it.
   try {
-    return (["success", "failure"] as const).some((o) => admits(job.if, PUSH_MAIN, o));
+    for (const results of assignments(needs)) if (admits(job.if, PUSH_MAIN, results)) return true;
+    return false;
   } catch {
-    return true; // Not evaluable: assume it can run on main, so ci-result must need it.
+    return true; // Not evaluable (or reads an unknown value): assume it can run on main, so ci-result must need it.
   }
 }
 
@@ -106,9 +161,13 @@ export function checkCiResultGate(workflow: Workflow): string[] {
     return refusals;
   }
 
-  const check = (event: WorkflowEvent, outcome: Outcome): boolean | string => {
+  // ci-result's needs all succeeded, or one of them failed.
+  const resultNeeds = needsOf(result);
+  const outcome = (o: "success" | "failure"): Record<string, Result> =>
+    Object.fromEntries(resultNeeds.map((n, i) => [n, o === "failure" && i === 0 ? "failure" : "success"]));
+  const check = (event: WorkflowEvent, o: "success" | "failure"): boolean | string => {
     try {
-      return admits(result.if, event, outcome);
+      return admits(result.if, event, outcome(o));
     } catch (e) {
       return (e as Error).message;
     }

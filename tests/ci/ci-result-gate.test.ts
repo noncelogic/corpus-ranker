@@ -58,6 +58,28 @@ test("a workflow with a push-to-main job that ci-result does not need is refused
   jobs(either).audit = pushJob({ if: "github.event_name != 'schedule'" });
   assertRefused(either, /`audit`/, "job whose if admits push");
 
+  // A job gated on its needs' results runs on main when they succeed.
+  const dependent = ciYml();
+  jobs(dependent).audit = pushJob({ needs: "test", if: "needs.test.result == 'success'" });
+  assertRefused(dependent, /`audit`.*not in ci-result's needs/, "job gated on needs.test.result");
+  const onFailure = ciYml();
+  jobs(onFailure).audit = pushJob({ needs: ["test"], if: "${{ always() && needs.test.result == 'failure' }}" });
+  assertRefused(onFailure, /`audit`/, "job that runs when a need fails");
+  // Values not known before the run are not read as null.
+  const outputs = ciYml();
+  jobs(outputs).audit = pushJob({ needs: "test", if: "needs.test.outputs.changed == 'true'" });
+  assertRefused(outputs, /`audit`/, "job gated on a need's output");
+  const undeclared = ciYml();
+  jobs(undeclared).audit = pushJob({ if: "needs.test.result == 'success'" });
+  assertRefused(undeclared, /`audit`/, "job reading a need it does not declare");
+  const unknownField = ciYml();
+  jobs(unknownField).audit = pushJob({ if: "github.actor == 'release-bot'" });
+  assertRefused(unknownField, /`audit`/, "job gated on a github field not known before the run");
+  // A need-gated job main never runs is still allowed.
+  const prOnly = ciYml();
+  jobs(prOnly).preview = pushJob({ needs: "test", if: "github.event_name == 'pull_request' && needs.test.result == 'success'" });
+  assertAllowed(prOnly, "pull_request-only job gated on its needs");
+
   // The image dry run dropped from needs.
   const noImage = ciYml();
   resultJob(noImage).needs = ["test"];

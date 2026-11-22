@@ -132,6 +132,22 @@ test("jobs main never runs need not be needed by ci-result", () => {
   assertAllowed(w, "pull_request-, schedule- and workflow_dispatch-only jobs");
 });
 
+test("a pull_request-only job with more needs than are enumerated is still not counted as running on main", () => {
+  // Seven needs is above the enumeration cutoff; the event exclusion is honoured first.
+  const needs = ["n1", "n2", "n3", "n4", "n5", "n6", "n7"];
+  for (const cond of ["github.event_name == 'pull_request'", "${{ always() && github.event_name == 'pull_request' }}"]) {
+    const w = ciYml();
+    for (const n of needs) jobs(w)[n] = pushJob({ if: "github.event_name == 'pull_request'" });
+    jobs(w).preview = pushJob({ needs, if: cond });
+    assertAllowed(w, `seven-need pull_request-only preview job (if: ${cond})`);
+  }
+  // The same seven-need job with an if that admits push is still refused.
+  const pushToo = ciYml();
+  for (const n of needs) jobs(pushToo)[n] = pushJob({ if: "github.event_name == 'pull_request'" });
+  jobs(pushToo).preview = pushJob({ needs, if: "github.event_name != 'schedule'" });
+  assertRefused(pushToo, /`preview`.*not in ci-result's needs/, "seven-need job whose if admits push");
+});
+
 test("ci-result does not list itself, and the gate does not ask it to", () => {
   const w = ciYml();
   assert.ok(!(resultJob(w).needs as string[]).includes(RESULT_JOB));

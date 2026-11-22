@@ -11,7 +11,8 @@
 //     not run it when a needed job failed (no always() / !cancelled()): a
 //     skipped required check reads as passing;
 //   - a job that runs on push to main (no job-level `if`, or one that admits a
-//     push to main under any outcome of its needs) is absent from ci-result's
+//     push to main under any outcome of its needs; an `if` that excludes push
+//     without reading its needs is honoured first, however many needs it has) is absent from ci-result's
 //     `needs`; each such job is named.
 //
 // It decides from structured fields only: `on:`, the job ids declared under
@@ -116,8 +117,31 @@ function* assignments(needs: string[]): Generator<Record<string, Result>> {
   for (const tail of assignments(rest)) for (const r of RESULTS) yield { [first!]: r, ...tail };
 }
 
+/**
+ * Whether the job's `if` excludes a push to main whatever its needs end with:
+ * it reads no needs and is falsy under every combination of the status
+ * functions' inputs (failed, cancelled). An `if` that reads a need, or that
+ * cannot be evaluated, is not an exclusion.
+ */
+function excludesPushToMain(raw: Yaml | undefined): boolean {
+  if (typeof raw !== "string") return raw === false;
+  const src = raw.trim().replace(/^\$\{\{([\s\S]*)\}\}$/, "$1").trim();
+  try {
+    for (const failed of [false, true]) {
+      for (const cancelled of [false, true]) {
+        const { value } = evaluate(src, { github: githubContext(PUSH_MAIN), needs: known("needs", {}), status: { failed, cancelled } });
+        if (!(value === false || value === null || value === 0 || value === "")) return false;
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Whether main runs this job on a push, under any outcome of its needs. */
 function runsOnPushToMain(job: Obj): boolean {
+  if (excludesPushToMain(job.if)) return false; // An event exclusion holds however many needs the job has.
   const needs = needsOf(job);
   if (needs.length > MAX_ENUMERATED_NEEDS) return true; // Too many outcomes to check: assume it runs, so ci-result must need it.
   try {

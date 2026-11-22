@@ -5,7 +5,8 @@
 // CR-M3-D2c declares it in devops/openbao/kubernetes-roles/eso-obs.attach.json), and each attached
 // policy grants read on exactly one kv/corpus-ranker/<purpose> path: no wildcard, no list, no write,
 // no metadata, and the two policies' paths are distinct and together are the custody paths the
-// ranker's `openbao` ExternalSecrets read (the ACR pull path is the role's estate-held grant).
+// ranker's `openbao` ExternalSecrets read (the ACR pull path is granted by the role's own
+// attach manifest, devops/openbao/kubernetes-roles/eso-obs.acr-pull.attach.json).
 //
 // The apply and its readback (deploy/openbao/check-eso-attach.ts) hold that rule themselves: a
 // manifest policy file granting more than one exact kv/corpus-ranker/<purpose> read is refused with
@@ -29,8 +30,8 @@ const ATTACHED = [
   { name: "external-secrets-corpus-ranker-minio", path: "corpus-ranker/minio" },
   { name: "external-secrets-corpus-ranker", path: "corpus-ranker/api-keys" },
 ] as const;
-/** The role's estate-held grant (meta-harness devops/aks/corpus-ranker-argo/README.md), not a policy in this repo. */
-const ESTATE_HELD = "corpus-ranker/acr-pull";
+/** The ACR pull path, granted through devops/openbao/kubernetes-roles/eso-obs.acr-pull.attach.json, not eso-obs.attach.json. */
+const ACR_PULL = "corpus-ranker/acr-pull";
 
 /** Every OpenBao key the rendered ExternalSecrets on ClusterSecretStore `openbao` read. */
 function storeKeys(): Set<string> {
@@ -73,10 +74,10 @@ function runner(t: TestContext, bao: DevOpenBao) {
 
 test("the estate External Secrets role attaches both per-custody-path read policies and each grants read on exactly one kv/corpus-ranker path", { timeout: 300_000 }, async (t) => {
   // The custody paths follow from the deployment spec: the attached policies cover exactly the
-  // openbao ExternalSecrets' paths other than the role's estate-held ACR pull grant.
+  // openbao ExternalSecrets' paths other than the ACR pull path its own manifest grants.
   const keys = storeKeys();
   assert.deepEqual(
-    new Set([...keys].filter((k) => k !== ESTATE_HELD)),
+    new Set([...keys].filter((k) => k !== ACR_PULL)),
     new Set(ATTACHED.map((a) => a.path)),
     "the attached policies' paths are the custody paths the ranker's openbao ExternalSecrets read",
   );
@@ -93,7 +94,7 @@ test("the estate External Secrets role attaches both per-custody-path read polic
   bao.root("policy", "write", PRIOR, "/tmp/prior.hcl");
   bao.root("kv", "put", "-mount=kv", "corpus-ranker/api-keys", "joe=api-secret");
   bao.root("kv", "put", "-mount=kv", "corpus-ranker/minio", "root-user=r", "root-password=p", "service-user=s", "service-password=q");
-  bao.root("kv", "put", "-mount=kv", ESTATE_HELD, "username=u", "password=p");
+  bao.root("kv", "put", "-mount=kv", ACR_PULL, "username=u", "password=p");
   bao.root("kv", "put", "-mount=kv", "other-product/api-keys", "x=y");
   bao.root(
     "write", ROLE,
@@ -153,7 +154,7 @@ test("the estate External Secrets role attaches both per-custody-path read polic
     assert.equal(code, 0, `${name} must read kv/${path}: ${out}`);
     const refused: string[][] = [
       ...ATTACHED.filter((a) => a.path !== path).map((a) => ["kv", "get", "-mount=kv", a.path]),
-      ["kv", "get", "-mount=kv", ESTATE_HELD],
+      ["kv", "get", "-mount=kv", ACR_PULL],
       ["kv", "get", "-mount=kv", "other-product/api-keys"],
       ["kv", "list", "-mount=kv", "corpus-ranker"],
       ["kv", "put", "-mount=kv", path, "x=y"],

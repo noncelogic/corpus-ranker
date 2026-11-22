@@ -67,7 +67,10 @@ jobs:
   # The one required status check on main (strict; declared in
   # devops/github/branch-protection.json). It needs every other job in this workflow and passes
   # only when all of them succeeded, so a job added here gates merges once it
-  # is listed under needs (tests/deploy/ci-gate.test.ts enforces that).
+  # is listed under needs (tests/deploy/ci-gate.test.ts enforces that). It runs
+  # on pull_request and on push to main, with if: always() so a failed need
+  # fails it rather than skipping it; tests/ci/ci-result-gate.test.ts refuses
+  # any job main runs that is missing from needs.
   ci-result:
     if: always()
     needs: [test, image]

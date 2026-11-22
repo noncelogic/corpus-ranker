@@ -1,0 +1,11 @@
+{
+  "auth_mount": "kubernetes",
+  "role": "eso-obs",
+  "mode": "add",
+  "add_token_policies": [
+    {
+      "name": "external-secrets-corpus-ranker-acr-pull",
+      "file": "devops/openbao/policies/external-secrets-corpus-ranker-acr-pull.hcl"
+    }
+  ]
+}

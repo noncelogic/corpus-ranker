@@ -8,9 +8,10 @@
 // and the migration Job must be among them.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { renderObjects, repoRoot, type K8sObject } from "./render.ts";
+import { policyPaths } from "./openbao-dev.ts";
 
 const REGISTRY = "noncelogicci.azurecr.io";
 const RANKER_IMAGE = `${REGISTRY}/corpus-ranker`;
@@ -205,4 +206,149 @@ test("the API Rollout and the migration Job pull noncelogicci.azurecr.io/corpus-
   for (const f of ["deploy/openbao/store-ghcr-pull.sh", "deploy/openbao/external-secrets-ghcr-pull.hcl"]) {
     assert.ok(!existsSync(resolve(repoRoot, f)), `${f} must be deleted`);
   }
+});
+
+// CR-M3-D2-ACRPULL acceptance (Rule: policies/placement-defaults.yaml#estate, one
+// exact path, read-only; Rule: policies/placement-defaults.yaml#credentials,
+// pull-only, per product): the estate External Secrets role's grant on the
+// ranker's ACR pull credential is declared in its own reviewed attach manifest,
+// devops/openbao/kubernetes-roles/eso-obs.acr-pull.attach.json, which adds the
+// existing exact-path policy external-secrets-corpus-ranker-acr-pull and nothing
+// else to role eso-obs on mount kubernetes. eso-obs.attach.json is unchanged, and
+// the coverage check grants only what the manifests grant, so without that manifest
+// it rejects the ranker-registry-pull read of kv/corpus-ranker/acr-pull.
+const ROLES_DIR = "devops/openbao/kubernetes-roles";
+const ACR_ATTACH_FILE = `${ROLES_DIR}/eso-obs.acr-pull.attach.json`;
+const ACR_POLICY = "external-secrets-corpus-ranker-acr-pull";
+
+interface AttachManifest {
+  auth_mount: string;
+  role: string;
+  mode: string;
+  add_token_policies: Array<{ name: string; file: string }>;
+}
+
+const readJson = (file: string): AttachManifest => JSON.parse(readFileSync(resolve(repoRoot, file), "utf8")) as AttachManifest;
+
+/** The one exact kv key (ExternalSecret form) a policy file grants read on; throws on anything wider. */
+function exactReadKey(file: string): string {
+  const paths = [...policyPaths(readFileSync(resolve(repoRoot, file), "utf8"))];
+  assert.equal(paths.length, 1, `${file} must grant exactly one path`);
+  const [path, caps] = paths[0]!;
+  assert.deepEqual(caps, ["read"], `${file} must grant read only`);
+  const m = /^kv\/data\/(corpus-ranker\/[a-z0-9-]+)$/.exec(path);
+  assert.ok(m, `${file} must grant one exact kv/data/corpus-ranker/<purpose> path, not ${path}`);
+  return m[1]!;
+}
+
+/** Assert the ACR pull attach manifest: mount kubernetes, role eso-obs, add-only, exactly the ACR pull policy. */
+function assertAcrAttach(a: AttachManifest): void {
+  assert.deepEqual(Object.keys(a).sort(), ["add_token_policies", "auth_mount", "mode", "role"], "the manifest declares nothing but mount, role, mode and policies to add");
+  assert.equal(a.auth_mount, "kubernetes");
+  assert.equal(a.role, "eso-obs");
+  assert.equal(a.mode, "add", "the attachment only adds; it removes or replaces nothing");
+  assert.ok(Array.isArray(a.add_token_policies), "add_token_policies must be a list");
+  assert.deepEqual(a.add_token_policies, [{ name: ACR_POLICY, file: `devops/openbao/policies/${ACR_POLICY}.hcl` }], `exactly ${ACR_POLICY}`);
+  assert.equal(exactReadKey(a.add_token_policies[0]!.file), PULL_PATH, `${ACR_POLICY} grants read on kv/${PULL_PATH} alone`);
+}
+
+test("eso-obs.acr-pull.attach.json attaches exactly external-secrets-corpus-ranker-acr-pull add-only on mount kubernetes role eso-obs", () => {
+  assert.ok(existsSync(resolve(repoRoot, ACR_ATTACH_FILE)), `${ACR_ATTACH_FILE} must exist`);
+  const a = readJson(ACR_ATTACH_FILE);
+  assertAcrAttach(a);
+
+  // The check refuses a drifted manifest.
+  const drift = (f: (x: AttachManifest) => void): AttachManifest => {
+    const x = structuredClone(a);
+    f(x);
+    return x;
+  };
+  assert.throws(() => assertAcrAttach(drift((x) => (x.auth_mount = "kubernetes-aks"))));
+  assert.throws(() => assertAcrAttach(drift((x) => (x.role = "eso"))));
+  assert.throws(() => assertAcrAttach(drift((x) => (x.mode = "replace"))));
+  assert.throws(() => assertAcrAttach(drift((x) => x.add_token_policies.pop())));
+  assert.throws(() => assertAcrAttach(drift((x) => x.add_token_policies.push({ name: "external-secrets-corpus-ranker", file: "devops/openbao/policies/external-secrets-corpus-ranker.hcl" }))));
+  assert.throws(() => assertAcrAttach(drift((x) => (x.add_token_policies[0]!.file = "devops/openbao/policies/external-secrets-corpus-ranker-minio.hcl"))));
+  assert.throws(() => assertAcrAttach(drift((x) => ((x as unknown as Record<string, unknown>).remove_token_policies = ["default"]))));
+
+  // The original two-policy manifest is left as it was: it does not also carry the ACR pull grant.
+  const main = readJson(`${ROLES_DIR}/eso-obs.attach.json`);
+  assert.deepEqual(main.add_token_policies.map((p) => p.name), ["external-secrets-corpus-ranker-minio", "external-secrets-corpus-ranker"]);
+});
+
+/** Every eso-obs attach manifest in the repository. */
+const esoObsManifests = (): string[] =>
+  readdirSync(resolve(repoRoot, ROLES_DIR))
+    .filter((f) => /^eso-obs(\.[a-z0-9-]+)?\.attach\.json$/.test(f))
+    .map((f) => `${ROLES_DIR}/${f}`)
+    .sort();
+
+/** The kv keys the given attach manifests' policies grant role eso-obs, each mapped to its manifest. Nothing else is granted. */
+function manifestGrants(files: string[]): Map<string, string> {
+  const grantedBy = new Map<string, string>();
+  for (const file of files) {
+    const a = readJson(file);
+    assert.deepEqual([a.auth_mount, a.role, a.mode], ["kubernetes", "eso-obs", "add"], `${file} must add to role eso-obs on mount kubernetes`);
+    for (const p of a.add_token_policies) {
+      const key = exactReadKey(p.file);
+      assert.ok(!grantedBy.has(key), `kv/${key} is granted by two manifests`);
+      grantedBy.set(key, file);
+    }
+  }
+  return grantedBy;
+}
+
+/** Every remote key an ExternalSecret reads; a find (no exact key) is reported as "<find>", which no manifest grants. */
+function readKeys(es: K8sObject): string[] {
+  const s = es.spec ?? {};
+  return [
+    ...((s.data ?? []) as Array<Record<string, any>>).map((d) => d.remoteRef?.key),
+    ...((s.dataFrom ?? []) as Array<Record<string, any>>).flatMap((d) => [d.extract?.key, d.find ? "<find>" : undefined]),
+  ].filter((k): k is string => k !== undefined);
+}
+
+/** Assert every ExternalSecret on ClusterSecretStore openbao, ranker-registry-pull among them, reads only manifest-granted keys. */
+function assertReadersCovered(objects: K8sObject[], grantedBy: Map<string, string>): void {
+  const readers = objects.filter((o) => o.kind === "ExternalSecret" && o.spec?.secretStoreRef?.kind === "ClusterSecretStore" && o.spec?.secretStoreRef?.name === "openbao");
+  assert.ok(readers.some((o) => o.metadata.name === PULL_SECRET), `${PULL_SECRET} must read ClusterSecretStore openbao`);
+  for (const es of readers) {
+    const keys = readKeys(es);
+    assert.ok(keys.length > 0, `ExternalSecret/${es.metadata.name} reads openbao but names no key`);
+    for (const key of keys) {
+      assert.ok(grantedBy.has(key), `ExternalSecret/${es.metadata.name} reads kv/${key}, which no eso-obs attach manifest grants`);
+    }
+  }
+}
+
+test("the ranker-registry-pull reader is covered by a manifest and no estate-held exemption remains", () => {
+  const manifests = esoObsManifests();
+  assert.deepEqual(manifests, [ACR_ATTACH_FILE, `${ROLES_DIR}/eso-obs.attach.json`]);
+  const grantedBy = manifestGrants(manifests);
+  const objects = renderObjects();
+  assertReadersCovered(objects, grantedBy);
+  assert.equal(grantedBy.get(PULL_PATH), ACR_ATTACH_FILE, `${PULL_SECRET}'s kv/${PULL_PATH} is granted by ${ACR_ATTACH_FILE}`);
+
+  // No exemption: the grants come from the manifests alone, so without the ACR pull
+  // manifest the checker rejects ranker-registry-pull's read of kv/corpus-ranker/acr-pull.
+  const withoutAcr = manifestGrants(manifests.filter((f) => f !== ACR_ATTACH_FILE));
+  assert.throws(() => assertReadersCovered(objects, withoutAcr), new RegExp(`ExternalSecret/${PULL_SECRET} reads kv/${PULL_PATH}, which no eso-obs attach manifest grants`));
+
+  // The checker rejects any ACR pull path the manifests do not grant, however the reader names it.
+  const mutate = (f: (spec: Record<string, any>) => void): K8sObject[] =>
+    objects.map((o) => {
+      if (o.kind !== "ExternalSecret" || o.metadata.name !== PULL_SECRET) return o;
+      const c = structuredClone(o);
+      f(c.spec);
+      return c;
+    });
+  for (const key of ["corpus-ranker/acr-pull-estate", "corpus-ranker/ghcr-pull", "other-product/acr-pull", "corpus-ranker/*"]) {
+    assert.throws(
+      () => assertReadersCovered(mutate((s) => (s.data = [{ secretKey: ".dockerconfigjson", remoteRef: { key } }])), grantedBy),
+      /which no eso-obs attach manifest grants/,
+      `an ungranted read of kv/${key} must be rejected`,
+    );
+    assert.throws(() => assertReadersCovered(mutate((s) => (s.dataFrom = [{ extract: { key } }])), grantedBy), /which no eso-obs attach manifest grants/);
+  }
+  assert.throws(() => assertReadersCovered(mutate((s) => (s.dataFrom = [{ find: { path: "corpus-ranker" } }])), grantedBy), /which no eso-obs attach manifest grants/);
+  assert.throws(() => assertReadersCovered(mutate((s) => { s.data = []; s.dataFrom = []; }), grantedBy), /names no key/);
 });

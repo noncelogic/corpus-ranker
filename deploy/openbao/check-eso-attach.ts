@@ -3,9 +3,12 @@
 // estate role eso-obs back from OpenBao, and check them against the
 // repository's attach manifest:
 //
-//   node deploy/openbao/check-eso-attach.ts
+//   node deploy/openbao/check-eso-attach.ts [devops/openbao/kubernetes-roles/eso-obs[.<name>].attach.json]
 //
-// devops/openbao/kubernetes-roles/eso-obs.attach.json declares an add-only
+// With no argument it reads devops/openbao/kubernetes-roles/eso-obs.attach.json;
+// given another eso-obs attach manifest beside it, it checks that one instead
+// (eso-obs.acr-pull.attach.json: the ACR pull grant, CR-M3-D2-ACRPULL-READBACK).
+// Any other argument is a usage error. An attach manifest declares an add-only
 // attachment: each policy it names (add_token_policies, each with its file in
 // devops/openbao/policies/) is attached to the Kubernetes auth role it names
 // (eso-obs on mount kubernetes, the role the `openbao` ClusterSecretStore logs
@@ -37,16 +40,17 @@
 import { readFileSync } from "node:fs";
 import { relative, resolve } from "node:path";
 import { bao, comparePolicy, parsePolicy, quote, ReadError } from "./policy-grants.ts";
-import { MANIFEST, readManifest, repoRoot } from "./eso-attach-manifest.ts";
+import { MANIFEST_ARG, manifestArg, readManifest, repoRoot } from "./eso-attach-manifest.ts";
 
 function main(argv: string[]): number {
-  if (argv.length > 0) {
-    process.stderr.write("usage: node deploy/openbao/check-eso-attach.ts\n");
+  const MANIFEST = manifestArg(argv);
+  if (MANIFEST === undefined) {
+    process.stderr.write(`usage: node deploy/openbao/check-eso-attach.ts ${MANIFEST_ARG}\n`);
     return 2;
   }
   const drift: string[] = [];
   try {
-    const attach = readManifest();
+    const attach = readManifest(MANIFEST);
     const rolePath = `auth/${attach.authMount}/role/${attach.role}`;
     const at = `role ${rolePath}`;
     const roleText = bao(["read", "-format=json", rolePath], /no value found at/i);

@@ -6,9 +6,9 @@
 // path (Rule: policies/placement-defaults.yaml#estate secrets;
 // Rule: policies/placement-defaults.yaml#code_location). Every ExternalSecret
 // in the deploy overlay that reads ClusterSecretStore `openbao` reads only a
-// path those policies grant or the role's estate-held ACR pull grant
-// (kv/corpus-ranker/acr-pull, meta-harness devops/aks/corpus-ranker-argo/README.md)
-// covers, and the generator-sourced database ExternalSecrets read no store
+// path those policies grant or the ACR pull grant that
+// devops/openbao/kubernetes-roles/eso-obs.acr-pull.attach.json declares
+// (kv/corpus-ranker/acr-pull, CR-M3-D2-ACRPULL), and the generator-sourced database ExternalSecrets read no store
 // (Rule: policies/placement-defaults.yaml#estate grants_from_spec).
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -19,11 +19,8 @@ import { policyPaths } from "./openbao-dev.ts";
 
 const ATTACH_FILE = "devops/openbao/kubernetes-roles/eso-obs.attach.json";
 const ATTACHED = ["external-secrets-corpus-ranker-minio", "external-secrets-corpus-ranker"];
-/**
- * The role's estate-held grant on the ranker's ACR pull credential (INTENTS I21):
- * kept in meta-harness devops/aks/corpus-ranker-argo/README.md, not in this repo.
- */
-const ESTATE_GRANTED = ["corpus-ranker/acr-pull"];
+/** The role's grant on the ranker's ACR pull credential (INTENTS I21), declared in its own attach manifest. */
+const ACR_ATTACH_FILE = "devops/openbao/kubernetes-roles/eso-obs.acr-pull.attach.json";
 const GENERATED = ["ranker-db-migrator", "ranker-db-service"];
 
 interface Attach {
@@ -33,7 +30,7 @@ interface Attach {
   add_token_policies: Array<{ name: string; file: string }>;
 }
 
-const readAttach = (): Attach => JSON.parse(readFileSync(resolve(repoRoot, ATTACH_FILE), "utf8")) as Attach;
+const readAttach = (file: string = ATTACH_FILE): Attach => JSON.parse(readFileSync(resolve(repoRoot, file), "utf8")) as Attach;
 
 /** The one exact kv path (the ExternalSecret key form, without kv/data/) a read-only policy file grants. */
 function grantedPath(file: string): string {
@@ -105,7 +102,8 @@ function assertReadsGranted(objs: K8sObject[], granted: Set<string>): void {
   }
 }
 
-const grantedByRole = (a: Attach): Set<string> => new Set([...a.add_token_policies.map((p) => grantedPath(p.file)), ...ESTATE_GRANTED]);
+const grantedByRole = (a: Attach): Set<string> =>
+  new Set([...a.add_token_policies, ...readAttach(ACR_ATTACH_FILE).add_token_policies].map((p) => grantedPath(p.file)));
 
 test("the eso-obs attach manifest names mount kubernetes, role eso-obs and exactly the two ranker read policy files, adding only", () => {
   const a = readAttach();
@@ -133,7 +131,7 @@ test("the eso-obs attach manifest names mount kubernetes, role eso-obs and exact
   assert.throws(() => grantedPath("devops/openbao/policies/corpus-ranker-minio-provision.hcl"));
 });
 
-test("every ExternalSecret that reads ClusterSecretStore openbao reads only a kv path an attached policy or the role's estate-held ACR pull grant covers, and the generator-sourced database ExternalSecrets read no store", () => {
+test("every ExternalSecret that reads ClusterSecretStore openbao reads only a kv path an attached policy or the role's attached ACR pull policy covers, and the generator-sourced database ExternalSecrets read no store", () => {
   const objs = renderObjects();
   const granted = grantedByRole(readAttach());
   assert.deepEqual([...granted].sort(), ["corpus-ranker/acr-pull", "corpus-ranker/api-keys", "corpus-ranker/minio"]);
@@ -164,8 +162,8 @@ test("every ExternalSecret that reads ClusterSecretStore openbao reads only a kv
 // the exact kv/data/corpus-ranker/api-keys and kv/data/corpus-ranker/minio
 // grants of external-secrets-corpus-ranker and external-secrets-corpus-ranker-minio
 // (granted and read back 2026-11-20, CRANK-188; Rule: policies/placement-defaults.yaml#estate,
-// Rule: policies/placement-defaults.yaml#code_location). The estate-held ACR pull
-// grant is not one of those policies, so none of these readers may use it.
+// Rule: policies/placement-defaults.yaml#code_location). The ACR pull grant is
+// not one of those policies, so none of these readers may use it.
 const ATTACHED_READERS: Record<string, string> = {
   "ranker-api-keys": "kv/data/corpus-ranker/api-keys",
   "ranker-minio": "kv/data/corpus-ranker/minio",

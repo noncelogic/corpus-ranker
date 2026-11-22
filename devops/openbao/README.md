@@ -42,15 +42,37 @@ ranker read grants, one per custody path. Two live here, in `policies/`:
 and `external-secrets-corpus-ranker.hcl` (read on `kv/corpus-ranker/api-keys`).
 [`kubernetes-roles/eso-obs.attach.json`](kubernetes-roles/eso-obs.attach.json)
 declares their attachment to `eso-obs`, in that order, add-only: the role's
-existing policies, among them the estate-held grant on the ranker's ACR pull
-credential `kv/corpus-ranker/acr-pull` (meta-harness
-devops/aks/corpus-ranker-argo/README.md), stay attached.
-That estate-held grant, `external-secrets-corpus-ranker-acr-pull`, was created
-and attached estate-side on 2026-11-19; its reviewed source is
-[`policies/external-secrets-corpus-ranker-acr-pull.hcl`](policies/external-secrets-corpus-ranker-acr-pull.hcl)
-(read on `kv/corpus-ranker/acr-pull` alone, read by the ExternalSecret
-`ranker-registry-pull` only; `tests/deploy/registry-pull-grant.test.ts`). It
-is not in the attach manifest: the role already holds it.
+existing policies stay attached.
+The third ranker grant, `external-secrets-corpus-ranker-acr-pull` on the
+ranker's ACR pull credential, was created and attached on 2026-11-19
+(meta-harness devops/aks/corpus-ranker-argo/README.md). Its policy is
+[`policies/external-secrets-corpus-ranker-acr-pull.hcl`](policies/external-secrets-corpus-ranker-acr-pull.hcl).
+It grants read on `kv/corpus-ranker/acr-pull` alone, and only the ExternalSecret
+`ranker-registry-pull` reads it (`tests/deploy/registry-pull-grant.test.ts`).
+Its attachment to `eso-obs` is declared in a manifest of its own,
+[`kubernetes-roles/eso-obs.acr-pull.attach.json`](kubernetes-roles/eso-obs.acr-pull.attach.json)
+(mount `kubernetes`, add-only, that one policy; `tests/deploy/image-pull.test.ts`).
+The role already holds that policy (readback 2026-11-20), so applying the
+manifest adds nothing. `eso-obs.attach.json` and the apply below cover only the
+two policies above; the same two commands take the ACR pull manifest as their
+one argument (CR-M3-D2-ACRPULL-READBACK), run from main by the DevOps route:
+
+```sh
+node deploy/openbao/attach-eso.ts devops/openbao/kubernetes-roles/eso-obs.acr-pull.attach.json
+node deploy/openbao/check-eso-attach.ts devops/openbao/kubernetes-roles/eso-obs.acr-pull.attach.json
+```
+
+The apply is add-only exactly as below (it rewrites the policy only if its
+stored text differs from the file, appends the name only if the role lacks it,
+and leaves every other role setting as it was); the readback passes only when
+`eso-obs` holds `external-secrets-corpus-ranker-acr-pull` among its
+`token_policies` and the stored policy grants read on
+`kv/corpus-ranker/acr-pull` alone, as its file does. The apply's JSON record
+and the readback's output go into meta-harness devops/openbao/README.md.
+`tests/deploy/openbao-eso-attach-readback.test.ts` runs both against a
+throwaway OpenBao holding the role as the estate does. Either script refuses
+any argument other than an `eso-obs[.<name>].attach.json` in
+`kubernetes-roles/` (exit 2, nothing read).
 The estate apply is CRANK-188, one command, logged in to OpenBao with rights
 to read and write policies and the role:
 

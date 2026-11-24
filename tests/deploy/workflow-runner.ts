@@ -12,9 +12,12 @@
 //     error;
 //   - conditions: job and step `if` (default `success()`), evaluated with the
 //     status functions over the job's needs and the job's earlier steps;
-//   - expressions: `${{ }}` in `run` and `env`, with the `github` and `needs`
-//     contexts, `*` object filters, `join`, `contains`, `startsWith`,
-//     `endsWith`, `format`-free literals, `==`, `!=`, `&&`, `||`, `!`;
+//   - expressions: `${{ }}` in `run` and `env`, with the `github` context
+//     (event_name, ref, base_ref; reading any other field, or one the caller
+//     lists as varying between runs, throws instead of reading null) and the
+//     `needs` context (declared needs' result only; reading an output or an
+//     undeclared need throws), `*` object filters, `join`, `contains`,
+//     `startsWith`, `endsWith`, `format`-free literals, `==`, `!=`, `&&`, `||`, `!`;
 //   - steps: every `run` step really runs under `bash -eo pipefail` with
 //     `GITHUB_JOB`, `GITHUB_EVENT_NAME`, `GITHUB_REF` and the step's `env`; a
 //     `uses` step is a recorded stand-in that succeeds; a failed step fails
@@ -57,6 +60,15 @@ export interface JobRecord {
   needs: string[];
   result: Result;
   steps: StepRecord[];
+}
+
+/** A job-level `if` the runner cannot decide for this event; names the job. */
+export class JobConditionError extends Error {
+  readonly job: string;
+  constructor(job: string, reason: string) {
+    super(`job ${job}: if cannot be decided: ${reason}`);
+    this.job = job;
+  }
 }
 
 export interface Run {
@@ -352,6 +364,27 @@ export interface RunOptions {
   env?: Record<string, string>;
   /** Working directory for `run` steps. */
   cwd: string;
+  /**
+   * `github` fields whose value differs between runs of this event (e.g.
+   * `ref`, which carries the pull request number): an expression that reads
+   * one throws, so no result is decided from this run's stand-in value.
+   */
+  varying?: string[];
+}
+
+/**
+ * A context object that throws on any property it does not hold (or holds
+ * but is told varies), instead of reading it as null.
+ */
+function strict<T extends object>(what: string, values: T, varying: readonly string[] = []): T {
+  return new Proxy(values, {
+    get(target, key, receiver) {
+      if (typeof key === "symbol" || key === "toJSON") return Reflect.get(target, key, receiver);
+      if (varying.includes(key)) throw new Error(`${what}.${key} varies between runs of this event`);
+      if (Object.hasOwn(target, key)) return Reflect.get(target, key, receiver);
+      throw new Error(`${what}.${key} is not modelled`);
+    },
+  });
 }
 
 const needsOf = (job: Obj, id: string): string[] => {
@@ -386,11 +419,11 @@ export function runWorkflow(workflow: Obj, opts: RunOptions): Run {
   if (!triggers(workflow, opts.event)) return { triggered: false, jobs: [] };
   const jobs = workflow.jobs;
   if (!isObj(jobs)) throw new Error("workflow has no jobs");
-  const github: { [key: string]: Value } = {
-    event_name: opts.event.name,
-    ref: opts.event.ref,
-    base_ref: opts.event.baseRef ?? "",
-  };
+  const github = strict<{ [key: string]: Value }>(
+    "github",
+    { event_name: opts.event.name, ref: opts.event.ref, base_ref: opts.event.baseRef ?? "" },
+    opts.varying,
+  );
   const results = new Map<string, JobRecord>();
   const ancestors = (id: string): string[] => {
     const seen = new Set<string>();
@@ -412,18 +445,23 @@ export function runWorkflow(workflow: Obj, opts: RunOptions): Run {
     if (typeof job["runs-on"] !== "string" && !Array.isArray(job["runs-on"])) throw new Error(`job ${id}: no runs-on`);
     const needs = needsOf(job, id);
     const needsCtx: ExprContext["needs"] = {};
-    for (const n of needs) needsCtx[n] = { result: results.get(n)!.result, outputs: {} };
+    for (const n of needs) needsCtx[n] = { result: results.get(n)!.result, outputs: strict(`needs.${n}.outputs`, {}) };
     const upstream = ancestors(id).map((a) => results.get(a)!.result);
     const jobCtx: ExprContext = {
       github,
-      needs: needsCtx,
+      needs: strict("needs", needsCtx),
       status: { failed: upstream.includes("failure"), cancelled: upstream.includes("cancelled") },
     };
     // A needed job that did not succeed also stops a default `success()` job.
     const needsOk = needs.every((n) => results.get(n)!.result === "success");
     const rawIf = job.if;
-    const usesStatus = typeof rawIf === "string" && evaluate(rawIf.replace(/^\$\{\{([\s\S]*)\}\}$/, "$1").trim(), jobCtx).usesStatus;
-    const runs = condition(rawIf, jobCtx) && (usesStatus || needsOk);
+    let runs: boolean;
+    try {
+      const usesStatus = typeof rawIf === "string" && evaluate(rawIf.replace(/^\$\{\{([\s\S]*)\}\}$/, "$1").trim(), jobCtx).usesStatus;
+      runs = condition(rawIf, jobCtx) && (usesStatus || needsOk);
+    } catch (e) {
+      throw new JobConditionError(id, e instanceof Error ? e.message : String(e));
+    }
     const record: JobRecord = {
       id,
       checkName: typeof job.name === "string" ? job.name : id,
@@ -442,7 +480,7 @@ export function runWorkflow(workflow: Obj, opts: RunOptions): Run {
       if (!isObj(raw)) throw new Error(`job ${id} step ${i}: not a mapping`);
       for (const key of Object.keys(raw)) if (!STEP_KEYS.has(key)) throw new Error(`job ${id} step ${i}: \`${key}\` is not modelled`);
       if (raw.shell !== undefined && raw.shell !== "bash") throw new Error(`job ${id} step ${i}: shell ${String(raw.shell)} is not modelled`);
-      const stepCtx: ExprContext = { github, needs: needsCtx, status: { failed, cancelled: false } };
+      const stepCtx: ExprContext = { github, needs: jobCtx.needs, status: { failed, cancelled: false } };
       const name = typeof raw.name === "string" ? raw.name : typeof raw.run === "string" ? raw.run : String(raw.uses);
       const kind = raw.run !== undefined ? "run" : "uses";
       if (!condition(raw.if, stepCtx)) {

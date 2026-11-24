@@ -17,14 +17,17 @@
 // selected for the event). The later tests take the repository's ci.yml,
 // take one required job off the pull-request path in each way the workflow
 // can (event selection, a job `if`, a renamed or removed job, a need that is
-// pushed-only) and require the same check to refuse it.
+// pushed-only, a job `if` that reads what differs between pull requests --
+// the actor, the head branch, the event payload, the pull request number)
+// and require the same check to refuse it. Such an `if` is refused, never
+// decided from this run's stand-in value or read as null.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { repoRoot, type Yaml } from "../deploy/render.ts";
-import { loadWorkflow, runWorkflow, type Run, type WorkflowEvent } from "../deploy/workflow-runner.ts";
+import { JobConditionError, loadWorkflow, runWorkflow, type Run, type WorkflowEvent } from "../deploy/workflow-runner.ts";
 import { loadDeclared } from "../../deploy/github/check-branch-protection.ts";
 
 /** The checks the estate declaration requires on corpus-ranker main (meta-harness devops/github/branch-protection/corpus-ranker.json). */
@@ -37,6 +40,10 @@ const ciYml = (): Obj => loadWorkflow(CI_YML);
 const jobsOf = (w: Obj) => w.jobs as { [id: string]: Obj };
 
 const PULL_REQUEST: WorkflowEvent = { name: "pull_request", ref: "refs/pull/91/merge", baseRef: "main" };
+// What differs from one pull request to main to the next among the github
+// fields the runner models: ref carries the pull request number. Fields it
+// does not model (actor, head_ref, event.*) throw on any read.
+const VARYING_ON_PULL_REQUESTS = ["ref"];
 
 const work = mkdtempSync(join(tmpdir(), "required-checks-"));
 process.on("exit", () => rmSync(work, { recursive: true, force: true }));
@@ -59,7 +66,7 @@ const ACTIONS_ENV = { GITHUB_REPOSITORY: "noncelogic/corpus-ranker", GITHUB_SHA:
 
 function runPullRequest(workflow: Obj): { run: Run; calls: string[] } {
   writeFileSync(callLog, "");
-  const run = runWorkflow(workflow, { event: PULL_REQUEST, binDir, cwd: repoRoot, env: { CALL_LOG: callLog, DOCKER_STATE: dockerState, ...ACTIONS_ENV } });
+  const run = runWorkflow(workflow, { event: PULL_REQUEST, varying: VARYING_ON_PULL_REQUESTS, binDir, cwd: repoRoot, env: { CALL_LOG: callLog, DOCKER_STATE: dockerState, ...ACTIONS_ENV } });
   return { run, calls: readFileSync(callLog, "utf8").split("\n").filter(Boolean) };
 }
 
@@ -68,7 +75,16 @@ function runPullRequest(workflow: Obj): { run: Run; calls: string[] } {
  * workflow, each with the reason; empty when every one reports.
  */
 function unreportedRequiredChecks(workflow: Obj): string[] {
-  const { run } = runPullRequest(workflow);
+  let run: Run;
+  try {
+    ({ run } = runPullRequest(workflow));
+  } catch (e) {
+    // A job-level if that reads what differs between pull requests (or what
+    // the runner does not model) runs on some pull requests only: no
+    // required check is proven to report on every one.
+    if (!(e instanceof JobConditionError)) throw e;
+    return REQUIRED_CHECKS.map((c) => `${c}: not shown to run on every pull_request to main (${e.message})`);
+  }
   if (!run.triggered) return REQUIRED_CHECKS.map((c) => `${c}: ci.yml is not run on pull_request to main`);
   const out: string[] = [];
   for (const check of REQUIRED_CHECKS) {
@@ -140,4 +156,24 @@ test("the check fails when a job a required check needs is skipped on pull reque
   const w = ciYml();
   jobsOf(w).test!.if = "github.event_name == 'push'";
   assertUnreported(w, "image", "image needs a push-only test");
+});
+
+test("the check fails when a required job's if reads a value that varies between pull requests", () => {
+  // Each condition admits this test's pull request (the runner's fixed actor,
+  // branch, draft flag and number) yet skips the job on some other pull
+  // request to main, so it is refused rather than read as null or as this one
+  // pull request's value.
+  const conditions = [
+    "github.event_name != 'pull_request' || github.actor != 'dependabot[bot]'",
+    "${{ github.event_name == 'push' || !startsWith(github.head_ref, 'dependabot/') }}",
+    "github.event.pull_request.draft == false",
+    "github.ref != 'refs/pull/7/merge'",
+  ];
+  for (const check of REQUIRED_CHECKS) {
+    for (const cond of conditions) {
+      const w = ciYml();
+      jobsOf(w)[check]!.if = check === "ci-result" ? `always() && (${cond.replace(/^\$\{\{\s*|\s*\}\}$/g, "")})` : cond;
+      assertUnreported(w, check, `${check} with if: ${cond}`);
+    }
+  }
 });

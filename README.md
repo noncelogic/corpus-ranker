@@ -27,7 +27,11 @@ npm start              # run it; GET /healthz answers {"status":"ok","service":"
                        # RANKER_S3_SECRET_ACCESS_KEY
 npm run typecheck      # tsc, strict
 npm run lint           # tsc with unused-code checks
-npm test               # full suite (node:test); needs Docker for the replica test
+npm test               # full suite (node:test) except tests/e2e; needs Docker for the replica test
+npm run test:e2e       # read-only API journey (tests/e2e) against a running ranker:
+                       # RANKER_BASE_URL, RANKER_API_KEY and RANKER_E2E_VIEW_ID (a saved
+                       # Ranked View); reads /readyz, the view's Top-N and its policy, and
+                       # writes nothing. Not part of npm test or the pull-request checks.
 ```
 
 ### Local replica

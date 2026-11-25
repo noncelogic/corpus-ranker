@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://noncelogic.github.io/corpus-ranker/schemas/v1/trend-observation.schema.json",
+  "title": "Trend observation (signals.trend_observation)",
+  "description": "A discovery signal stored beside the corpus: a term seen trending in a geo, with the feed's traffic label as the feed carries it and the news items it attached. One per (term, geo, first_seen); a repeat sighting moves last_seen. Buzz-class: never a quality score.",
+  "type": "object",
+  "required": ["signal_class", "term", "geo", "traffic", "first_seen", "last_seen", "news_items"],
+  "additionalProperties": false,
+  "properties": {
+    "signal_class": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$", "description": "Which signal feed this is, e.g. google_trends." },
+    "term": { "$ref": "common.schema.json#/$defs/non_empty_string" },
+    "geo": { "$ref": "common.schema.json#/$defs/non_empty_string", "description": "The feed's geo code, e.g. US." },
+    "traffic": { "type": "string", "description": "The traffic label verbatim from the feed, e.g. \"2,000+\"; not a number." },
+    "first_seen": { "$ref": "common.schema.json#/$defs/timestamp" },
+    "last_seen": { "$ref": "common.schema.json#/$defs/timestamp" },
+    "news_items": {
+      "type": "array",
+      "description": "News items the feed attached to the newest sighting.",
+      "items": {
+        "type": "object",
+        "required": ["title", "url"],
+        "additionalProperties": false,
+        "properties": {
+          "title": { "$ref": "common.schema.json#/$defs/non_empty_string" },
+          "url": { "type": "string", "format": "uri" },
+          "source": { "type": "string" }
+        }
+      }
+    }
+  }
+}

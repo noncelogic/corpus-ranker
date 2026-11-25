@@ -55,3 +55,22 @@ for (const [section, file] of Object.entries(contracts.manifest.objects)) {
     }
   });
 }
+
+// CR-SIG-SCHEMA: trend observations (signals.trend_observation) are discovery
+// signals stored beside the corpus, not an A2 object, so they sit outside the
+// A2 manifest but under the same versioned contract.
+test("the trend-observation example validates against its schema", () => {
+  const file = "trend-observation.schema.json";
+  assert.ok(contracts.schemaFiles.includes(file), `missing ${file}`);
+  const { valid, invalid } = listExamples("trend-observation");
+  assert.ok(valid.length >= 1, "trend-observation needs at least one valid example");
+  assert.ok(invalid.length >= 1, "trend-observation needs at least one invalid example");
+  for (const ex of valid) {
+    const errors = contracts.registry.validate(JSON.parse(readFileSync(ex, "utf8")), schemaUri(file));
+    assert.deepEqual(errors, [], `${ex.slice(contractsRoot.length + 1)} should be valid`);
+  }
+  for (const ex of invalid) {
+    const errors = contracts.registry.validate(JSON.parse(readFileSync(ex, "utf8")), schemaUri(file));
+    assert.notDeepEqual(errors, [], `${ex.slice(contractsRoot.length + 1)} should be rejected`);
+  }
+});

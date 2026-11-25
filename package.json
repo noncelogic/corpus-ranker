@@ -14,12 +14,8 @@
     "start": "node dist/server.js",
     "export": "node src/export/cli.ts export",
     "restore": "node src/export/cli.ts restore",
-<<<<<<< HEAD
-    "test": "node --test --test-concurrency=1 \"tests/*.test.ts\" \"tests/!(e2e)/**/*.test.ts\"",
+    "test": "node --test --test-concurrency=1 \"tests/*.test.ts\" \"tests/!(e2e)/**/*.test.ts\" \"deploy/**/*.test.ts\"",
     "test:e2e": "node --test --test-concurrency=1 \"tests/e2e/**/*.test.ts\"",
-=======
-    "test": "node --test --test-concurrency=1 \"tests/**/*.test.ts\" \"deploy/**/*.test.ts\"",
->>>>>>> origin/main
     "test:foundation": "node --test --test-concurrency=1 \"tests/foundation/*.test.ts\"",
     "replica:up": "docker compose -f docker-compose.yaml up -d --wait",
     "replica:down": "docker compose -f docker-compose.yaml down -v",

@@ -4,8 +4,8 @@
 // journey needs a running ranker the pull request does not have.
 //
 // The scripts are not read as text: the repository's package.json is copied
-// into a scratch workspace with marker tests under tests/e2e/, tests/api/ and
-// a nested directory, then `npm test` and `npm run test:e2e` run for real
+// into a scratch workspace with marker tests under tests/e2e/, tests/api/, a
+// nested directory and deploy/, then `npm test` and `npm run test:e2e` run for real
 // there and the markers each one ran are compared.
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
@@ -16,7 +16,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
-const MARKERS = ["e2e/journey", "e2e/nested/deeper", "top", "api/unit", "ci/nested/gate"] as const;
+const MARKERS = ["tests/e2e/journey", "tests/e2e/nested/deeper", "tests/top", "tests/api/unit", "tests/ci/nested/gate", "deploy/argocd/rollout"] as const;
 
 /** A marker test that drops <name>.ran in $MARKER_DIR when it runs. */
 const marker = (name: string) => `import { test } from "node:test";
@@ -30,7 +30,7 @@ function workspace(t: TestContext): string {
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   cpSync(join(repoRoot, "package.json"), join(dir, "package.json"));
   for (const name of MARKERS) {
-    const file = join(dir, "tests", `${name}.test.ts`);
+    const file = join(dir, `${name}.test.ts`);
     mkdirSync(dirname(file), { recursive: true });
     writeFileSync(file, marker(name));
   }
@@ -51,6 +51,6 @@ function ran(dir: string, args: string[]): string[] {
 
 test("the fast test glob excludes tests/e2e while test:e2e runs only tests/e2e", (t) => {
   const dir = workspace(t);
-  assert.deepEqual(ran(dir, ["test", "--silent"]), ["api/unit", "ci/nested/gate", "top"], "npm test runs every test outside tests/e2e and none inside it");
-  assert.deepEqual(ran(dir, ["run", "test:e2e", "--silent"]), ["e2e/journey", "e2e/nested/deeper"], "npm run test:e2e runs tests/e2e and nothing else");
+  assert.deepEqual(ran(dir, ["test", "--silent"]), ["deploy/argocd/rollout", "tests/api/unit", "tests/ci/nested/gate", "tests/top"], "npm test runs every test outside tests/e2e, deploy/ tests included, and none inside it");
+  assert.deepEqual(ran(dir, ["run", "test:e2e", "--silent"]), ["tests/e2e/journey", "tests/e2e/nested/deeper"], "npm run test:e2e runs tests/e2e and nothing else");
 });

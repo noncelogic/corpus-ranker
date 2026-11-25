@@ -1,0 +1,73 @@
+name: deploy
+run-name: deploy-batch:${{ inputs.batch }}
+
+# The deploy queue (owner INTENTS I67, DELIVERY-GUARANTEE-CHECK; Rule:
+# policies/placement-defaults.yaml#gates). Merges run the fast checks only
+# (ci.yml); merged changes are deployed together in batches, and this lane is
+# where each batch's candidate is deployed and its E2E and journeys run, so a
+# deploy never holds up a merge and the slow suites still run on what ships.
+#
+# The conductor dispatches it once per batch with the batch id and the
+# candidate: the full commit SHA of the batch's newest merged commit on main.
+# The one job checks that exact commit out (never the moving branch head) and,
+# through .github/scripts/deploy-candidate.sh:
+#   - builds the candidate image from the one build definition publish.yml
+#     pushes (.github/scripts/image-build.sh), labelled with the candidate;
+#   - deploys it with its own Postgres (pgvector) and MinIO from
+#     docker-compose.yaml: the database bootstrapped by deploy/db/bootstrap.sql,
+#     migrated by deploy/db/migrate.sh with the migrations copied out of the
+#     candidate image (as deploy/'s migration Job does), the service logged in
+#     as a ranker_app member, booted with a generated API key set;
+#   - waits for /readyz (the probe the blue/green Rollout promotes on);
+#   - runs the E2E suite (npm run test:e2e, tests/e2e) and then the journeys
+#     (npm run test:journeys, tests/journeys) against the deployed service;
+#   - always tears the deployment down.
+# A red E2E or journey fails this run: its failure goes back to the changes in
+# the batch. The deployment is the runner's own and lives for this run only:
+# the estate rollout of deploy/ stays Argo CD from Git (estate-side GitOps),
+# so this workflow holds no credential and contacts no cluster.
+#
+# It runs where ci.yml's test job already runs the compose replica, with a
+# read-only token and no secrets. Inputs reach the script through env only,
+# never interpolated into script text. No push, workflow_run or schedule
+# trigger: a merge never deploys by itself; the batch dispatcher does.
+on:
+  workflow_dispatch:
+    inputs:
+      candidate:
+        description: Full 40-character commit SHA on main to deploy (the batch's newest merged commit)
+        required: true
+        type: string
+      batch:
+        description: Deploy batch id (1-64 letters, digits, '.', '_' or '-')
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  deploy:
+    name: deploy candidate, E2E and journeys
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      CANDIDATE: ${{ inputs.candidate }}
+      BATCH: ${{ inputs.batch }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ inputs.candidate }}
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+      - name: Deploy the candidate
+        run: bash .github/scripts/deploy-candidate.sh up
+      - name: E2E
+        run: bash .github/scripts/deploy-candidate.sh suite test:e2e
+      - name: Journeys
+        run: bash .github/scripts/deploy-candidate.sh suite test:journeys
+      - name: Tear down
+        if: always()
+        run: bash .github/scripts/deploy-candidate.sh down

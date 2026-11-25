@@ -41,3 +41,22 @@ ports default to 5432 / 9000 / 9001 and can be overridden with
 `docker compose port <service> <port>`).
 `docker compose down -v` (or `npm run replica:down`) removes it and its data.
 Credentials in `docker-compose.yaml` are local throwaways, not estate secrets.
+
+### Merge lane and deploy lane
+
+Pull requests and merges run the fast checks only (`.github/workflows/ci.yml`).
+The E2E suite (`tests/e2e/*.e2e.ts`) and the journeys (`tests/journeys/*.journey.ts`)
+run in the deploy lane, `.github/workflows/deploy.yml`: dispatched once per deploy
+batch with the batch id and the candidate commit, it builds the candidate image,
+deploys it with its own Postgres and MinIO (database bootstrapped and migrated as
+`deploy/` does), waits for `/readyz`, runs `npm run test:e2e` then
+`npm run test:journeys` against it, and tears it down. Run the same locally from a
+clean checkout of a commit (needs Docker):
+
+```sh
+export RUNNER_TEMP=$(mktemp -d) GITHUB_REPOSITORY=noncelogic/corpus-ranker
+CANDIDATE=$(git rev-parse HEAD) BATCH=local bash .github/scripts/deploy-candidate.sh up
+bash .github/scripts/deploy-candidate.sh suite test:e2e
+bash .github/scripts/deploy-candidate.sh suite test:journeys
+bash .github/scripts/deploy-candidate.sh down
+```

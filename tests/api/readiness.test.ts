@@ -16,15 +16,17 @@
 // refusal) runs with a deadline it cannot reach, so only the answer settles
 // the check. A case that expects a timeout hangs that dependency on a
 // listener that never answers and runs the readiness deadline on a mocked
-// clock: the test waits until the healthy peer's real check has completed,
-// then advances the clock past the deadline, so however slow the runner is,
-// the peer reports ok and only the hanging dependency reports timeout. Which
-// of the two wins when both are in play is proved with an injected rejection
-// and a mocked clock at the end of this file.
+// clock: the test waits until the listener has received the hanging probe's
+// bytes and the healthy peer's real check has completed, checks on the server
+// that no response has been started, then advances the clock past the
+// deadline, so however slow the runner is, the peer reports ok and only the
+// hanging dependency reports timeout. Which of the two wins when both are in
+// play is proved with an injected rejection and a mocked clock at the end of
+// this file.
 import { after, before, test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { createServer as createTcpServer, type AddressInfo, type Server as TcpServer, type Socket } from "node:net";
-import type { Server } from "node:http";
+import type { Server, ServerResponse } from "node:http";
 import { createServer, loadConfig } from "../../src/server.ts";
 import { readiness } from "../../src/api/readiness.ts";
 import { pgClient, type Db } from "../../src/db/client.ts";
@@ -51,11 +53,20 @@ before(
   { timeout: 600_000 },
 );
 
-/** A TCP listener that accepts connections and never says a word: a dependency that hangs. */
-async function silentListener(): Promise<string> {
+/** A dependency that hangs: where it listens, and a signal for the first probe bytes it receives. */
+interface SilentListener {
+  host: string;
+  /** Whether a connection has delivered bytes yet (a Postgres startup or an HTTP request). */
+  received(): boolean;
+}
+
+/** A TCP listener that accepts connections, reads what they send and never says a word: a dependency that hangs. */
+async function silentListener(): Promise<SilentListener> {
   const sockets = new Set<Socket>();
+  let received = false;
   const server: TcpServer = createTcpServer((s) => {
     sockets.add(s);
+    s.on("data", () => (received = true));
     s.on("close", () => sockets.delete(s));
   });
   await new Promise<void>((ok) => server.listen(0, "127.0.0.1", ok));
@@ -63,7 +74,7 @@ async function silentListener(): Promise<string> {
     for (const s of sockets) s.destroy();
     return new Promise((ok) => server.close(ok));
   });
-  return `127.0.0.1:${(server.address() as AddressInfo).port}`;
+  return { host: `127.0.0.1:${(server.address() as AddressInfo).port}`, received: () => received };
 }
 
 /**
@@ -125,40 +136,58 @@ async function readyz(base: string): Promise<Readiness> {
 }
 
 /**
- * GET /readyz from a service whose `hanging` dependency never answers while its other one is the
- * healthy replica, deciding the result by explicit steps on a mocked readiness clock: the healthy
- * peer's real check runs to completion while the deadline is still pending (however long that takes
- * on the runner), readiness is seen still waiting on the hanging one, and only then does the clock
- * pass the deadline. Returns the completed response and the service's base URL.
+ * GET /readyz from a service whose `hanging` dependency is wired to `silent` while its other one is
+ * the healthy replica, deciding the result by explicit steps on a mocked readiness clock rather than
+ * a race: the hanging check's probe bytes are seen arriving at the silent listener, the healthy
+ * peer's real check is seen completed, the server is seen not to have started its response, and
+ * only then does the clock pass the deadline. Returns the completed response and the service's base URL.
  */
-async function readyzAtTheDeadline(t: TestContext, w: Wiring, hanging: "database" | "object_store") {
+async function readyzAtTheDeadline(t: TestContext, w: Wiring, hanging: "database" | "object_store", silent: SilentListener) {
   const cfg = config(w);
   const healthyDone = deferred<void>();
-  /** The real check, reporting when it has completed so the test can step past it. */
-  const watched = <R>(run: Promise<R>): Promise<R> =>
+  /** The healthy dependency's real check, reporting when it has completed. */
+  const healthy = <R>(run: Promise<R>): Promise<R> =>
     run.then(
       (r) => (healthyDone.resolve(), r),
       (err: Error) => (healthyDone.reject(err), Promise.reject(err)),
     );
-  const deps: { db?: Db; store?: ObjectStore } = {};
+  const realDb = pgClient(cfg.databaseUrl);
+  // Ended without waiting, as the server ends the pool it owns: a query still stuck on the silent
+  // listener settles when that listener's cleanup drops its sockets.
+  cleanups.push(() => void realDb.end());
+  const realStore = s3ObjectStore(cfg.objectStore);
+  let db: Db;
+  let store: ObjectStore;
   if (hanging === "object_store") {
-    const real = pgClient(cfg.databaseUrl);
-    cleanups.push(() => real.end());
-    // Open the pool's connection on the real clock: postgres.js schedules a connect with setTimeout,
-    // which the mocked clock would hold back. The readiness query still runs over the real login.
-    await real.query("select 1");
-    deps.db = { ...real, query: ((text: string, params?: never) => watched(real.query(text, params))) as Db["query"] };
+    // Open the healthy pool's connection on the real clock: postgres.js schedules a connect with
+    // setTimeout, which the mocked clock would hold back. The readiness query still runs over the real login.
+    await realDb.query("select 1");
+    db = { ...realDb, query: ((text: string, params?: never) => healthy(realDb.query(text, params))) as Db["query"] };
+    store = realStore;
   } else {
-    const real = s3ObjectStore(cfg.objectStore);
-    deps.store = { ...real, ping: (signal) => watched(real.ping(signal)) };
+    db = realDb;
+    store = { ...realStore, ping: (signal) => healthy(realStore.ping(signal)) };
   }
-  const base = await listen(createServer(cfg, { ...deps, readinessTimeoutMs: TIMEOUT_MS }));
+  const server = createServer(cfg, { db, store, readinessTimeoutMs: TIMEOUT_MS });
+  /** The server's side of the readiness request: whether it has started (or finished) its response. */
+  let served: ServerResponse | undefined;
+  server.on("request", (_req, res: ServerResponse) => (served = res));
+  const base = await listen(server);
   t.mock.timers.enable({ apis: ["setTimeout"] });
-  let answered = false;
-  const pending = readyz(base).finally(() => (answered = true));
+  const pending = readyz(base);
+  // See the hanging probe arrive at the silent listener before the clock moves. postgres.js
+  // schedules its connect with a zero-delay setTimeout, which the mocked clock holds back: each
+  // step releases the timers due now (tick(0) never moves the clock, so the readiness deadline,
+  // TIMEOUT_MS ahead, stays pending) and lets the sockets run, until the bytes have arrived.
+  for (let step = 0; !silent.received(); step++) {
+    assert.ok(step < 10_000, `the hanging ${hanging} probe never reached its silent listener`);
+    t.mock.timers.tick(0);
+    await flush();
+  }
   await healthyDone.promise; // the healthy peer's real check has completed; the deadline has not moved
-  await flush();
-  assert.equal(answered, false, "readiness answered before the deadline passed, with one dependency still hanging");
+  assert.ok(served, "the server never received the readiness request");
+  assert.equal(served.headersSent, false, "readiness answered before the deadline passed, with one dependency still hanging");
+  assert.equal(served.writableEnded, false, "readiness answered before the deadline passed, with one dependency still hanging");
   t.mock.timers.tick(TIMEOUT_MS);
   return { r: await pending, base };
 }
@@ -191,8 +220,9 @@ test("not ready while the database is unavailable, failed or timed out, though t
     });
   }
   await t.test("timed out", async (t) => {
-    const databaseUrl = `postgres://${SERVICE.user}:${SERVICE.password}@${await silentListener()}/ranker`;
-    const { r, base } = await readyzAtTheDeadline(t, { databaseUrl }, "database");
+    const silent = await silentListener();
+    const databaseUrl = `postgres://${SERVICE.user}:${SERVICE.password}@${silent.host}/ranker`;
+    const { r, base } = await readyzAtTheDeadline(t, { databaseUrl }, "database", silent);
     assert.equal(r.status, 503, JSON.stringify(r.body));
     assert.deepEqual(r.body, { status: "not_ready", checks: { database: "timeout", object_store: "ok" } });
     await assertLive(base);
@@ -215,7 +245,8 @@ test("not ready while the object store is unavailable, refuses the credentials o
     });
   }
   await t.test("timed out", async (t) => {
-    const { r, base } = await readyzAtTheDeadline(t, { s3Endpoint: `http://${await silentListener()}` }, "object_store");
+    const silent = await silentListener();
+    const { r, base } = await readyzAtTheDeadline(t, { s3Endpoint: `http://${silent.host}` }, "object_store", silent);
     assert.equal(r.status, 503, JSON.stringify(r.body));
     assert.deepEqual(r.body, { status: "not_ready", checks: { database: "ok", object_store: "timeout" } });
     await assertLive(base);

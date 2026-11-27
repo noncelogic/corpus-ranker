@@ -25,7 +25,7 @@
 // this file.
 import { after, before, test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { createServer as createTcpServer, type AddressInfo, type Server as TcpServer, type Socket } from "node:net";
+import { connect, createServer as createTcpServer, type AddressInfo, type Server as TcpServer, type Socket } from "node:net";
 import type { Server, ServerResponse } from "node:http";
 import { createServer, loadConfig } from "../../src/server.ts";
 import { readiness } from "../../src/api/readiness.ts";
@@ -36,6 +36,11 @@ import { freshDatabase, type FreshDb } from "../schema/fresh-db.ts";
 const SERVICE = { user: "ranker_rdy", password: "rdy-local-only" };
 /** The readiness bound these tests run with (on a mocked clock wherever a dependency hangs). */
 const TIMEOUT_MS = 1_500;
+/**
+ * Real-time patience for the harness's own waits (probe bytes arriving, the healthy peer answering):
+ * a stuck step fails the test instead of hanging it. No readiness result depends on it.
+ */
+const HARNESS_WATCHDOG_MS = 60_000;
 /** A deadline no real-path answer can lose to (cleared as soon as the check settles). */
 const NO_DEADLINE_MS = 24 * 60 * 60 * 1_000;
 
@@ -56,17 +61,19 @@ before(
 /** A dependency that hangs: where it listens, and a signal for the first probe bytes it receives. */
 interface SilentListener {
   host: string;
-  /** Whether a connection has delivered bytes yet (a Postgres startup or an HTTP request). */
-  received(): boolean;
+  /** Resolves on the listener's first `data` event: the first probe bytes (a Postgres startup or an HTTP request) have arrived. */
+  arrived: Promise<void>;
 }
 
 /** A TCP listener that accepts connections, reads what they send and never says a word: a dependency that hangs. */
 async function silentListener(): Promise<SilentListener> {
   const sockets = new Set<Socket>();
-  let received = false;
+  const arrived = deferred<void>();
   const server: TcpServer = createTcpServer((s) => {
     sockets.add(s);
-    s.on("data", () => (received = true));
+    s.on("data", () => {
+      arrived.resolve();
+    });
     s.on("close", () => sockets.delete(s));
   });
   await new Promise<void>((ok) => server.listen(0, "127.0.0.1", ok));
@@ -74,7 +81,7 @@ async function silentListener(): Promise<SilentListener> {
     for (const s of sockets) s.destroy();
     return new Promise((ok) => server.close(ok));
   });
-  return { host: `127.0.0.1:${(server.address() as AddressInfo).port}`, received: () => received };
+  return { host: `127.0.0.1:${(server.address() as AddressInfo).port}`, arrived: arrived.promise };
 }
 
 /**
@@ -175,16 +182,9 @@ async function readyzAtTheDeadline(t: TestContext, w: Wiring, hanging: "database
   const base = await listen(server);
   t.mock.timers.enable({ apis: ["setTimeout"] });
   const pending = readyz(base);
-  // See the hanging probe arrive at the silent listener before the clock moves. postgres.js
-  // schedules its connect with a zero-delay setTimeout, which the mocked clock holds back: each
-  // step releases the timers due now (tick(0) never moves the clock, so the readiness deadline,
-  // TIMEOUT_MS ahead, stays pending) and lets the sockets run, until the bytes have arrived.
-  for (let step = 0; !silent.received(); step++) {
-    assert.ok(step < 10_000, `the hanging ${hanging} probe never reached its silent listener`);
-    t.mock.timers.tick(0);
-    await flush();
-  }
-  await healthyDone.promise; // the healthy peer's real check has completed; the deadline has not moved
+  await untilProbeArrives(t, silent, `the hanging ${hanging} probe`);
+  // The healthy peer's real check has completed; the deadline has not moved.
+  await underWatchdog(healthyDone.promise, `the healthy peer of the hanging ${hanging} never answered`);
   assert.ok(served, "the server never received the readiness request");
   assert.equal(served.headersSent, false, "readiness answered before the deadline passed, with one dependency still hanging");
   assert.equal(served.writableEnded, false, "readiness answered before the deadline passed, with one dependency still hanging");
@@ -192,11 +192,68 @@ async function readyzAtTheDeadline(t: TestContext, w: Wiring, hanging: "database
   return { r: await pending, base };
 }
 
+/** Await `step`, failing with `what` if it has not settled within HARNESS_WATCHDOG_MS of real time. */
+async function underWatchdog<T>(step: Promise<T>, what: string): Promise<T> {
+  // AbortSignal.timeout runs on Node's internal timers, which the mocked setTimeout does not hold back.
+  const watchdog = AbortSignal.timeout(HARNESS_WATCHDOG_MS);
+  let onAbort!: () => void;
+  const expired = new Promise<never>((_, fail) => {
+    onAbort = () => fail(new Error(`${what} within ${HARNESS_WATCHDOG_MS} ms of real time`));
+    watchdog.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([step, expired]);
+  } finally {
+    watchdog.removeEventListener("abort", onAbort);
+  }
+}
+
+/**
+ * Wait for the silent listener's first `data` event, however long real TCP takes to deliver it.
+ * postgres.js schedules its connect with a zero-delay setTimeout, which the mocked clock holds back,
+ * so while waiting a real setInterval (not mocked: only setTimeout is) keeps releasing the timers due
+ * now with tick(0). tick(0) never moves the mocked clock, so the readiness deadline, TIMEOUT_MS ahead,
+ * stays frozen. The wait ends on the data event itself, not after a number of turns.
+ */
+async function untilProbeArrives(t: TestContext, silent: SilentListener, what: string): Promise<void> {
+  const release = setInterval(() => t.mock.timers.tick(0), 1);
+  try {
+    await underWatchdog(silent.arrived, `${what} never reached its silent listener`);
+  } finally {
+    clearInterval(release);
+  }
+}
+
 async function assertLive(base: string): Promise<void> {
   const res = await fetch(`${base}/healthz`, { signal: AbortSignal.timeout(TIMEOUT_MS) });
   assert.equal(res.status, 200, "liveness must not depend on the database or the object store");
   await res.arrayBuffer();
 }
+
+test("harness: a hanging probe's bytes are awaited however many event-loop turns they take to arrive", async (t) => {
+  const silent = await silentListener();
+  const [host, port] = silent.host.split(":");
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  let deadlinePassed = false;
+  setTimeout(() => (deadlinePassed = true), TIMEOUT_MS); // stands in for the readiness deadline
+  // A slow runner: the client only gets as far as scheduling its connect (with a zero-delay timer
+  // the mocked clock holds back, as postgres.js does) after more event-loop turns than any fixed
+  // turn budget allows, and only then do its bytes travel over real TCP.
+  let client: Socket | undefined;
+  const late = (async () => {
+    for (let turn = 0; turn <= 10_000; turn++) await flush();
+    setTimeout(() => {
+      client = connect(Number(port), host, () => client!.write("startup"));
+    }, 0);
+  })();
+  try {
+    await untilProbeArrives(t, silent, "the late probe");
+    assert.equal(deadlinePassed, false, "waiting for the probe bytes moved the mocked readiness clock");
+  } finally {
+    await late;
+    client?.destroy();
+  }
+});
 
 test("ready once both the database and the object store answer", async () => {
   const base = await start();

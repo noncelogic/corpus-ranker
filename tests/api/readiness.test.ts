@@ -10,6 +10,14 @@
 // service's own login, and the default wiring from loadConfig. The time bound
 // itself is proved with controlled timers in the "bound:" tests at the end of
 // this file, not with a wall clock; these tests assert on the completed response.
+//
+// No real-path case races a real answer against the real readiness timer: a
+// case that expects a dependency to answer (ok, or failed on a reset or a
+// refusal) runs with a deadline it cannot reach, so only the answer settles
+// the check, and a case that expects a timeout hangs that dependency on a
+// listener that never answers, so only the deadline settles it. Which of the
+// two wins when both are in play is proved with an injected rejection and a
+// mocked clock at the end of this file.
 import { after, before, test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { createServer as createTcpServer, type AddressInfo, type Server as TcpServer, type Socket } from "node:net";
@@ -21,6 +29,8 @@ import { freshDatabase, type FreshDb } from "../schema/fresh-db.ts";
 const SERVICE = { user: "ranker_rdy", password: "rdy-local-only" };
 /** The readiness bound these tests run with; requests below allow it generous patience, not a timing assertion. */
 const TIMEOUT_MS = 1_500;
+/** A deadline no real-path answer can lose to (cleared as soon as the check settles). */
+const NO_DEADLINE_MS = 24 * 60 * 60 * 1_000;
 
 let db: FreshDb;
 const cleanups: (() => unknown)[] = [];
@@ -71,14 +81,18 @@ interface Wiring {
   s3SecretAccessKey?: string;
 }
 
-/** Start the service with the default wiring for the replica, overridden by `w`; returns its base URL. */
-async function start(w: Wiring = {}): Promise<string> {
+/**
+ * Start the service with the default wiring for the replica, overridden by `w`; returns its base URL.
+ * `readinessTimeoutMs` defaults to a deadline the checks cannot reach; pass TIMEOUT_MS only where a
+ * dependency hangs, so the deadline is the one thing that can settle it.
+ */
+async function start(w: Wiring = {}, readinessTimeoutMs = NO_DEADLINE_MS): Promise<string> {
   const env: Record<string, string> = {
     RANKER_DATABASE_URL: w.databaseUrl ?? db.databaseUrl(SERVICE),
     RANKER_S3_ENDPOINT: w.s3Endpoint ?? db.minioEndpoint!,
   };
   if (w.s3SecretAccessKey !== undefined) env.RANKER_S3_SECRET_ACCESS_KEY = w.s3SecretAccessKey;
-  const server: Server = createServer(loadConfig(env), { readinessTimeoutMs: TIMEOUT_MS });
+  const server: Server = createServer(loadConfig(env), { readinessTimeoutMs });
   await new Promise<void>((ok) => server.listen(0, "127.0.0.1", ok));
   cleanups.push(() => new Promise((ok) => server.close(ok)));
   return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
@@ -90,7 +104,8 @@ interface Readiness {
 }
 
 async function readyz(base: string): Promise<Readiness> {
-  const res = await fetch(`${base}/readyz`, { signal: AbortSignal.timeout(TIMEOUT_MS * 4) });
+  // Patience for a stuck request only; the readiness result never depends on it.
+  const res = await fetch(`${base}/readyz`, { signal: AbortSignal.timeout(60_000) });
   const body = (await res.json()) as Readiness["body"];
   return { status: res.status, body };
 }
@@ -116,7 +131,7 @@ test("not ready while the database is unavailable, failed or timed out, though t
   ];
   for (const [name, url, expected] of cases) {
     await t.test(name, async () => {
-      const base = await start({ databaseUrl: await url() });
+      const base = await start({ databaseUrl: await url() }, expected === "timeout" ? TIMEOUT_MS : NO_DEADLINE_MS);
       const r = await readyz(base);
       assert.equal(r.status, 503, JSON.stringify(r.body));
       assert.deepEqual(r.body, { status: "not_ready", checks: { database: expected, object_store: "ok" } });
@@ -134,7 +149,7 @@ test("not ready while the object store is unavailable, refuses the credentials o
   ];
   for (const [name, wiring, expected] of cases) {
     await t.test(name, async () => {
-      const base = await start(await wiring());
+      const base = await start(await wiring(), expected === "timeout" ? TIMEOUT_MS : NO_DEADLINE_MS);
       const r = await readyz(base);
       assert.equal(r.status, 503, JSON.stringify(r.body));
       assert.deepEqual(r.body, { status: "not_ready", checks: { database: "ok", object_store: expected } });
@@ -144,13 +159,15 @@ test("not ready while the object store is unavailable, refuses the credentials o
 });
 
 test("not ready while neither answers", async () => {
+  // Both refuse, under a deadline they cannot reach: each check settles on its own reset alone.
+  // (One failing while the other times out is proved with controlled timers below.)
   const base = await start({
-    databaseUrl: `postgres://${SERVICE.user}:${SERVICE.password}@${await silentListener()}/ranker`,
+    databaseUrl: `postgres://${SERVICE.user}:${SERVICE.password}@${await refusingListener()}/ranker`,
     s3Endpoint: `http://${await refusingListener()}`,
   });
   const r = await readyz(base);
   assert.equal(r.status, 503);
-  assert.deepEqual(r.body, { status: "not_ready", checks: { database: "timeout", object_store: "failed" } });
+  assert.deepEqual(r.body, { status: "not_ready", checks: { database: "failed", object_store: "failed" } });
   await assertLive(base);
 });
 
@@ -162,11 +179,16 @@ test("not ready while neither answers", async () => {
 interface Deferred<T> {
   promise: Promise<T>;
   resolve: (v: T) => void;
+  reject: (err: Error) => void;
 }
 function deferred<T>(): Deferred<T> {
   let resolve!: (v: T) => void;
-  const promise = new Promise<T>((ok) => (resolve = ok));
-  return { promise, resolve };
+  let reject!: (err: Error) => void;
+  const promise = new Promise<T>((ok, fail) => {
+    resolve = ok;
+    reject = fail;
+  });
+  return { promise, resolve, reject };
 }
 
 /** Call readiness over the given dependency stubs, tracking whether it has answered. */
@@ -253,4 +275,43 @@ test("bound: a dependency that fails answers failed at once, without waiting for
   }, async () => {});
   const r = await p.result; // no tick: the mocked clock never reaches the bound
   assert.deepEqual(r.body, { status: "not_ready", checks: { database: "failed", object_store: "ok" } });
+});
+
+// failed versus timeout, decided by an explicit step rather than a race: the
+// probe's rejection is injected and the readiness clock is mocked, so each
+// case settles exactly the way the test drives it, with no real sleep.
+
+test("reports failed when the probe rejects before the readiness deadline", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const dbProbe = deferred<unknown[]>();
+  const storeProbe = deferred<void>();
+  const p = probe(() => dbProbe.promise, () => storeProbe.promise);
+  t.mock.timers.tick(TIMEOUT_MS - 1);
+  await flush();
+  assert.equal(p.settled(), false, "readiness answered before either probe settled or the deadline passed");
+  dbProbe.reject(new Error("ECONNRESET"));
+  storeProbe.reject(new Error("ECONNRESET"));
+  await flush();
+  assert.equal(p.settled(), true, "readiness had not answered once both probes rejected");
+  t.mock.timers.tick(1); // the deadline now passes; it must not overturn the answer already given
+  const r = await p.result;
+  assert.equal(r.status, 503);
+  assert.deepEqual(r.body, { status: "not_ready", checks: { database: "failed", object_store: "failed" } });
+});
+
+test("reports timeout when the readiness deadline passes before the probe settles", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const dbProbe = deferred<unknown[]>();
+  const storeProbe = deferred<void>();
+  const p = probe(() => dbProbe.promise, () => storeProbe.promise);
+  t.mock.timers.tick(TIMEOUT_MS);
+  await flush();
+  assert.equal(p.settled(), true, "readiness had not answered once the deadline passed");
+  // The probes reject only after the deadline; the timeout already reported stands.
+  dbProbe.reject(new Error("ECONNRESET"));
+  storeProbe.reject(new Error("ECONNRESET"));
+  await flush();
+  const r = await p.result;
+  assert.equal(r.status, 503);
+  assert.deepEqual(r.body, { status: "not_ready", checks: { database: "timeout", object_store: "timeout" } });
 });

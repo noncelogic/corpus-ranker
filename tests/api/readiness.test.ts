@@ -24,6 +24,7 @@
 // play is proved with an injected rejection and a mocked clock at the end of
 // this file.
 import { after, before, test, type TestContext } from "node:test";
+import { AsyncLocalStorage, createHook } from "node:async_hooks";
 import assert from "node:assert/strict";
 import { connect, createServer as createTcpServer, type AddressInfo, type Server as TcpServer, type Socket } from "node:net";
 import type { Server, ServerResponse } from "node:http";
@@ -152,8 +153,11 @@ async function readyz(base: string, signal: AbortSignal = AbortSignal.timeout(HA
  * one cancellable harness deadline (underOneDeadline). Returns the completed response and the base URL.
  */
 async function readyzAtTheDeadline(t: TestContext, w: Wiring, hanging: "database" | "object_store", silent: SilentListener) {
-  const realTimersBefore = refedRealTimers();
   const cfg = config(w);
+  // Only the real timers this case's own pool starts are counted, never a process-wide total: a real
+  // timer elsewhere (an earlier case's idle pool) may start or expire at any moment during the case.
+  const poolTimers = ownedRealTimers();
+  t.after(() => poolTimers.stop());
   const healthyDone = deferred<void>();
   /** The healthy dependency's real check, reporting when it has completed. */
   const healthy = <R>(run: Promise<R>): Promise<R> =>
@@ -161,7 +165,9 @@ async function readyzAtTheDeadline(t: TestContext, w: Wiring, hanging: "database
       (r) => (healthyDone.resolve(), r),
       (err: Error) => (healthyDone.reject(err), Promise.reject(err)),
     );
-  const realDb = pgClient(cfg.databaseUrl);
+  const pool = pgClient(cfg.databaseUrl);
+  // Every call into the pool runs as its owner, so the timers it starts (and those of the connections it opens) are tracked.
+  const realDb: Db = { ...pool, query: ((text: string, params?: never) => poolTimers.own(() => pool.query(text, params))) as Db["query"] };
   // Ended without waiting, as the server ends the pool it owns: a query still stuck on the silent
   // listener settles when that listener's cleanup drops its sockets.
   cleanups.push(() => void realDb.end());
@@ -197,15 +203,64 @@ async function readyzAtTheDeadline(t: TestContext, w: Wiring, hanging: "database
     assert.equal(served.writableEnded, false, "readiness answered before the deadline passed, with one dependency still hanging");
     t.mock.timers.tick(TIMEOUT_MS);
   });
-  // Every timer the case started runs on the mocked clock: a real one (e.g. a pool's idle timer armed
-  // before the clock was mocked) cannot be cancelled by the mocked clearTimeout and would keep the
-  // test process alive for its whole delay after the last assertion.
-  assert.equal(refedRealTimers(), realTimersBefore, `the timed-out ${hanging} case left a real timer running`);
+  // Every timer this case's pool started runs on the mocked clock or has been cleared: a real one (e.g.
+  // an idle timer armed before the clock was mocked) cannot be cancelled by the mocked clearTimeout and
+  // would keep the test process alive for its whole delay after the last assertion.
+  assert.deepEqual(await poolTimers.running(), [], `the timed-out ${hanging} case's pool left a real timer running`);
   return { r, base };
 }
 
-/** Real timers that keep the process alive (mocked timers are not real resources and are not counted). */
-const refedRealTimers = (): number => process.getActiveResourcesInfo().filter((r) => r === "Timeout").length;
+/**
+ * The real timers started by code run through `own` (and by the async work it starts, such as a pool's
+ * connections), tracked by handle from creation until cleared or fired. A mocked timer is no real
+ * resource, so it is never seen; a real timer started anywhere else is never counted.
+ */
+function ownedRealTimers() {
+  const owner = new AsyncLocalStorage<true>();
+  const live = new Set<number>();
+  const hook = createHook({
+    init: (id, type) => {
+      if (type === "Timeout" && owner.getStore()) live.add(id);
+    },
+    destroy: (id) => {
+      live.delete(id);
+    },
+  }).enable();
+  return {
+    own: <R>(run: () => R): R => owner.run(true, run),
+    /** The handles still running, once the destroy events already due have been delivered. */
+    running: async (): Promise<number[]> => {
+      await flush();
+      return [...live];
+    },
+    stop: () => void hook.disable(),
+  };
+}
+
+test("harness: the leaked-timer check counts only the owner's real timers, not one elsewhere expiring meanwhile", async (t) => {
+  // A real timer outside the owner (an earlier case's idle pool), running when the case starts and expiring during it.
+  const outside = deferred<void>();
+  setTimeout(() => outside.resolve(), 0);
+  const timers = ownedRealTimers();
+  t.after(() => timers.stop());
+  await outside.promise;
+  assert.deepEqual(await timers.running(), [], "a real timer the owner never started was counted against it");
+  // A real timer the owner starts and leaves running is caught; once cleared it is not.
+  const leaked = timers.own(() => setTimeout(() => {}, NO_DEADLINE_MS));
+  assert.equal((await timers.running()).length, 1, "a real timer the owner left running was missed");
+  clearTimeout(leaked);
+  assert.deepEqual(await timers.running(), [], "a cleared timer was still counted");
+  // A real timer started by async work the owner began (as a pool's connection arms its idle timer) is the owner's too.
+  const fromItsWork = deferred<NodeJS.Timeout>();
+  timers.own(() => setImmediate(() => fromItsWork.resolve(setTimeout(() => {}, NO_DEADLINE_MS))));
+  const late = await fromItsWork.promise;
+  assert.equal((await timers.running()).length, 1, "a real timer started by the owner's async work was missed");
+  clearTimeout(late);
+  // A timer on the mocked clock is no real resource: never counted.
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  timers.own(() => setTimeout(() => {}, NO_DEADLINE_MS));
+  assert.deepEqual(await timers.running(), [], "a mocked timer was counted as a real one");
+});
 
 /** Await `step` until it settles or a step's harness deadline aborts, whichever comes first. */
 type Wait = <S>(step: Promise<S>, what: string) => Promise<S>;

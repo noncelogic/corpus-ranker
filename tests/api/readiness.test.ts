@@ -290,17 +290,48 @@ test("harness: a hanging probe's bytes are awaited however many event-loop turns
   }
 });
 
-/** A stand-in readiness request: it settles when the test says so or, like fetch, rejects once its signal aborts. */
+/**
+ * A stand-in readiness request. Its completion is a gate the test releases (`answer`), kept apart from
+ * cancellation: an abort is only recorded (`aborted` resolves on the abort event), so a test can see the
+ * request cancelled yet still in flight and check the helper keeps awaiting it until the gate is released.
+ */
 function fakeRequest() {
   const answer = deferred<string>();
+  const aborted = deferred<void>();
   let seen: AbortSignal | undefined;
   let settled = false;
   const request = (signal: AbortSignal): Promise<string> => {
     seen = signal;
-    signal.addEventListener("abort", () => answer.reject(new Error("aborted")), { once: true });
+    signal.addEventListener("abort", () => aborted.resolve(), { once: true });
     return answer.promise.finally(() => (settled = true));
   };
-  return { request, answer, signal: () => seen, settled: () => settled };
+  return { request, answer, aborted: aborted.promise, signal: () => seen, settled: () => settled };
+}
+
+/** Track whether `run` has settled, without leaving its rejection unhandled. */
+function tracked(run: Promise<unknown>): () => boolean {
+  let done = false;
+  run.then(
+    () => (done = true),
+    () => (done = true),
+  );
+  return () => done;
+}
+
+/**
+ * After the request has been cancelled: the helper must still be pending while the cancelled request
+ * is in flight, and settle only once the test releases the request's completion gate.
+ */
+async function assertAwaitsCancelledRequest(req: ReturnType<typeof fakeRequest>, run: Promise<unknown>, failure: RegExp): Promise<void> {
+  const runSettled = tracked(run);
+  await req.aborted; // the abort event itself, not a guess at how many turns it takes
+  assert.equal(req.signal()?.aborted, true, "the request must be cancelled");
+  await flush();
+  assert.equal(req.settled(), false, "the fake request completes only when the test releases it");
+  assert.equal(runSettled(), false, "the case failed while its cancelled request was still in flight: the helper must await it");
+  req.answer.reject(new Error("aborted"));
+  await assert.rejects(run, failure);
+  assert.equal(req.settled(), true, "the request must be awaited before the case fails");
 }
 
 const never = new Promise<never>(() => {});
@@ -339,9 +370,7 @@ test("harness: when the one harness deadline passes, the request is cancelled an
   await flush();
   assert.equal(req.signal()?.aborted, false, "the request must run under the harness deadline from the start");
   deadline.abort();
-  await assert.rejects(run, /the hanging probe never reached its silent listener within the harness deadline/);
-  assert.equal(req.signal()?.aborted, true, "the request must be cancelled when the harness deadline passes");
-  assert.equal(req.settled(), true, "the request must be awaited before the case fails");
+  await assertAwaitsCancelledRequest(req, run, /the hanging probe never reached its silent listener within the harness deadline/);
 });
 
 test("harness: a failing step cancels and awaits the request", { timeout: 10_000 }, async () => {
@@ -349,9 +378,7 @@ test("harness: a failing step cancels and awaits the request", { timeout: 10_000
   const run = underOneDeadline(new AbortController().signal, req.request, async () => {
     assert.fail("readiness answered before the deadline passed");
   });
-  await assert.rejects(run, /readiness answered before the deadline passed/);
-  assert.equal(req.signal()?.aborted, true, "a failing step must cancel the request");
-  assert.equal(req.settled(), true, "the request must be awaited before the case fails");
+  await assertAwaitsCancelledRequest(req, run, /readiness answered before the deadline passed/);
 });
 
 test("harness: once the steps are done the request's own answer is returned, still under the harness deadline", { timeout: 10_000 }, async () => {

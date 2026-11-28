@@ -135,9 +135,10 @@ interface Readiness {
   body: { status: string; checks: { database: string; object_store: string } };
 }
 
-async function readyz(base: string): Promise<Readiness> {
-  // Patience for a stuck request only; the readiness result never depends on it.
-  const res = await fetch(`${base}/readyz`, { signal: AbortSignal.timeout(60_000) });
+async function readyz(base: string, signal: AbortSignal = AbortSignal.timeout(HARNESS_WATCHDOG_MS)): Promise<Readiness> {
+  // Patience for a stuck request only (the mixed cases pass their one harness deadline instead);
+  // the readiness result never depends on it.
+  const res = await fetch(`${base}/readyz`, { signal });
   const body = (await res.json()) as Readiness["body"];
   return { status: res.status, body };
 }
@@ -147,7 +148,8 @@ async function readyz(base: string): Promise<Readiness> {
  * the healthy replica, deciding the result by explicit steps on a mocked readiness clock rather than
  * a race: the hanging check's probe bytes are seen arriving at the silent listener, the healthy
  * peer's real check is seen completed, the server is seen not to have started its response, and
- * only then does the clock pass the deadline. Returns the completed response and the service's base URL.
+ * only then does the clock pass the deadline. The request, both waits and the response all run under
+ * one cancellable harness deadline (underOneDeadline). Returns the completed response and the base URL.
  */
 async function readyzAtTheDeadline(t: TestContext, w: Wiring, hanging: "database" | "object_store", silent: SilentListener) {
   const cfg = config(w);
@@ -181,44 +183,76 @@ async function readyzAtTheDeadline(t: TestContext, w: Wiring, hanging: "database
   server.on("request", (_req, res: ServerResponse) => (served = res));
   const base = await listen(server);
   t.mock.timers.enable({ apis: ["setTimeout"] });
-  const pending = readyz(base);
-  await untilProbeArrives(t, silent, `the hanging ${hanging} probe`);
-  // The healthy peer's real check has completed; the deadline has not moved.
-  await underWatchdog(healthyDone.promise, `the healthy peer of the hanging ${hanging} never answered`);
-  assert.ok(served, "the server never received the readiness request");
-  assert.equal(served.headersSent, false, "readiness answered before the deadline passed, with one dependency still hanging");
-  assert.equal(served.writableEnded, false, "readiness answered before the deadline passed, with one dependency still hanging");
-  t.mock.timers.tick(TIMEOUT_MS);
-  return { r: await pending, base };
+  // AbortSignal.timeout runs on Node's internal timers, which the mocked setTimeout does not hold back.
+  const r = await underOneDeadline(AbortSignal.timeout(HARNESS_WATCHDOG_MS), (signal) => readyz(base, signal), async (wait) => {
+    // Both probes are observed from the start: the hanging one's bytes arriving and the healthy peer's real check.
+    await releasingDueTimers(t, () =>
+      Promise.all([
+        wait(silent.arrived, `the hanging ${hanging} probe never reached its silent listener`),
+        wait(healthyDone.promise, `the healthy peer of the hanging ${hanging} never answered`),
+      ]),
+    );
+    assert.ok(served, "the server never received the readiness request");
+    assert.equal(served.headersSent, false, "readiness answered before the deadline passed, with one dependency still hanging");
+    assert.equal(served.writableEnded, false, "readiness answered before the deadline passed, with one dependency still hanging");
+    t.mock.timers.tick(TIMEOUT_MS);
+  });
+  return { r, base };
 }
 
-/** Await `step`, failing with `what` if it has not settled within HARNESS_WATCHDOG_MS of real time. */
-async function underWatchdog<T>(step: Promise<T>, what: string): Promise<T> {
-  // AbortSignal.timeout runs on Node's internal timers, which the mocked setTimeout does not hold back.
-  const watchdog = AbortSignal.timeout(HARNESS_WATCHDOG_MS);
-  let onAbort!: () => void;
-  const expired = new Promise<never>((_, fail) => {
-    onAbort = () => fail(new Error(`${what} within ${HARNESS_WATCHDOG_MS} ms of real time`));
-    watchdog.addEventListener("abort", onAbort, { once: true });
-  });
+/** Await `step` until it settles or a step's harness deadline aborts, whichever comes first. */
+type Wait = <S>(step: Promise<S>, what: string) => Promise<S>;
+
+/**
+ * Run a readiness request and the harness's steps under one cancellable harness deadline (real time,
+ * never the mocked readiness clock): the request starts at once under that deadline (its only abort
+ * timer), and every `wait` in `steps` ends as soon as the deadline passes or the request settles, since
+ * a request that settles before the steps are done never reached the deadline step. If anything
+ * fails, the request is cancelled and awaited before the failure is reported. Once the steps are done
+ * the request's own answer is returned, still bounded by the same deadline.
+ */
+async function underOneDeadline<T>(deadline: AbortSignal, request: (signal: AbortSignal) => Promise<T>, steps: (wait: Wait) => Promise<void>): Promise<T> {
+  const cancel = new AbortController();
+  const pending = request(AbortSignal.any([deadline, cancel.signal]));
+  const settledEarly = pending.then(
+    () => Promise.reject(new Error("the readiness request settled before the deadline step: it answered")),
+    (err: Error) => Promise.reject(new Error("the readiness request settled before the deadline step: it failed", { cause: err })),
+  );
+  settledEarly.catch(() => {}); // reported only through a wait that it ends
   try {
-    return await Promise.race([step, expired]);
-  } finally {
-    watchdog.removeEventListener("abort", onAbort);
+    await steps(waitUnder(deadline, settledEarly));
+  } catch (err) {
+    cancel.abort(err);
+    await pending.catch(() => {});
+    throw err;
   }
+  return pending;
+}
+
+/** A Wait that ends each step once `deadline` aborts or `alsoEnds` (if given) rejects, whichever comes first. */
+function waitUnder(deadline: AbortSignal, alsoEnds: Promise<never> = never): Wait {
+  return (step, what) =>
+    new Promise((ok, fail) => {
+      const onAbort = () => fail(new Error(`${what} within the harness deadline (${HARNESS_WATCHDOG_MS} ms of real time)`));
+      if (deadline.aborted) return onAbort();
+      deadline.addEventListener("abort", onAbort, { once: true });
+      Promise.race([step, alsoEnds])
+        .then(ok, fail)
+        .finally(() => deadline.removeEventListener("abort", onAbort));
+    });
 }
 
 /**
- * Wait for the silent listener's first `data` event, however long real TCP takes to deliver it.
- * postgres.js schedules its connect with a zero-delay setTimeout, which the mocked clock holds back,
- * so while waiting a real setInterval (not mocked: only setTimeout is) keeps releasing the timers due
- * now with tick(0). tick(0) never moves the mocked clock, so the readiness deadline, TIMEOUT_MS ahead,
- * stays frozen. The wait ends on the data event itself, not after a number of turns.
+ * Run `waiting` while releasing the mocked timers due now. postgres.js schedules its connect with a
+ * zero-delay setTimeout, which the mocked clock holds back, so while waiting a real setInterval (not
+ * mocked: only setTimeout is) keeps releasing them with tick(0). tick(0) never moves the mocked clock,
+ * so the readiness deadline, TIMEOUT_MS ahead, stays frozen. The wait ends on what `waiting` awaits
+ * (the probe's data event itself), not after a number of turns.
  */
-async function untilProbeArrives(t: TestContext, silent: SilentListener, what: string): Promise<void> {
+async function releasingDueTimers<T>(t: TestContext, waiting: () => Promise<T>): Promise<T> {
   const release = setInterval(() => t.mock.timers.tick(0), 1);
   try {
-    await underWatchdog(silent.arrived, `${what} never reached its silent listener`);
+    return await waiting();
   } finally {
     clearInterval(release);
   }
@@ -247,12 +281,89 @@ test("harness: a hanging probe's bytes are awaited however many event-loop turns
     }, 0);
   })();
   try {
-    await untilProbeArrives(t, silent, "the late probe");
+    const wait = waitUnder(AbortSignal.timeout(HARNESS_WATCHDOG_MS));
+    await releasingDueTimers(t, () => wait(silent.arrived, "the late probe never reached its silent listener"));
     assert.equal(deadlinePassed, false, "waiting for the probe bytes moved the mocked readiness clock");
   } finally {
     await late;
     client?.destroy();
   }
+});
+
+/** A stand-in readiness request: it settles when the test says so or, like fetch, rejects once its signal aborts. */
+function fakeRequest() {
+  const answer = deferred<string>();
+  let seen: AbortSignal | undefined;
+  let settled = false;
+  const request = (signal: AbortSignal): Promise<string> => {
+    seen = signal;
+    signal.addEventListener("abort", () => answer.reject(new Error("aborted")), { once: true });
+    return answer.promise.finally(() => (settled = true));
+  };
+  return { request, answer, signal: () => seen, settled: () => settled };
+}
+
+const never = new Promise<never>(() => {});
+
+test("harness: a readiness request that fails during the waits ends them at once, not at the harness deadline", { timeout: 10_000 }, async () => {
+  const deadline = new AbortController(); // never fires: only the request's failure can end the wait
+  const req = fakeRequest();
+  const run = underOneDeadline(deadline.signal, req.request, async (wait) => {
+    await wait(never, "the hanging probe never reached its silent listener");
+  });
+  await flush();
+  req.answer.reject(new Error("socket hang up"));
+  await assert.rejects(run, (err: Error) => {
+    assert.match(err.message, /the readiness request settled before the deadline step/);
+    assert.match(String((err.cause as Error)?.message), /socket hang up/);
+    return true;
+  });
+});
+
+test("harness: a readiness request answered during the waits ends them at once", { timeout: 10_000 }, async () => {
+  const req = fakeRequest();
+  const run = underOneDeadline(new AbortController().signal, req.request, async (wait) => {
+    await wait(never, "the healthy peer never answered");
+  });
+  await flush();
+  req.answer.resolve("ready");
+  await assert.rejects(run, /the readiness request settled before the deadline step/);
+});
+
+test("harness: when the one harness deadline passes, the request is cancelled and awaited before the case fails", { timeout: 10_000 }, async () => {
+  const deadline = new AbortController();
+  const req = fakeRequest();
+  const run = underOneDeadline(deadline.signal, req.request, async (wait) => {
+    await wait(never, "the hanging probe never reached its silent listener");
+  });
+  await flush();
+  assert.equal(req.signal()?.aborted, false, "the request must run under the harness deadline from the start");
+  deadline.abort();
+  await assert.rejects(run, /the hanging probe never reached its silent listener within the harness deadline/);
+  assert.equal(req.signal()?.aborted, true, "the request must be cancelled when the harness deadline passes");
+  assert.equal(req.settled(), true, "the request must be awaited before the case fails");
+});
+
+test("harness: a failing step cancels and awaits the request", { timeout: 10_000 }, async () => {
+  const req = fakeRequest();
+  const run = underOneDeadline(new AbortController().signal, req.request, async () => {
+    assert.fail("readiness answered before the deadline passed");
+  });
+  await assert.rejects(run, /readiness answered before the deadline passed/);
+  assert.equal(req.signal()?.aborted, true, "a failing step must cancel the request");
+  assert.equal(req.settled(), true, "the request must be awaited before the case fails");
+});
+
+test("harness: once the steps are done the request's own answer is returned, still under the harness deadline", { timeout: 10_000 }, async () => {
+  const deadline = new AbortController();
+  const req = fakeRequest();
+  const steps = deferred<void>();
+  const run = underOneDeadline(deadline.signal, req.request, (wait) => wait(steps.promise, "a step"));
+  steps.resolve();
+  await flush();
+  req.answer.resolve("ready");
+  assert.equal(await run, "ready");
+  assert.equal(req.signal()?.aborted, false);
 });
 
 test("ready once both the database and the object store answer", async () => {

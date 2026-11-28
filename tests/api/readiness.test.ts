@@ -152,6 +152,7 @@ async function readyz(base: string, signal: AbortSignal = AbortSignal.timeout(HA
  * one cancellable harness deadline (underOneDeadline). Returns the completed response and the base URL.
  */
 async function readyzAtTheDeadline(t: TestContext, w: Wiring, hanging: "database" | "object_store", silent: SilentListener) {
+  const realTimersBefore = refedRealTimers();
   const cfg = config(w);
   const healthyDone = deferred<void>();
   /** The healthy dependency's real check, reporting when it has completed. */
@@ -168,9 +169,8 @@ async function readyzAtTheDeadline(t: TestContext, w: Wiring, hanging: "database
   let db: Db;
   let store: ObjectStore;
   if (hanging === "object_store") {
-    // Open the healthy pool's connection on the real clock: postgres.js schedules a connect with
-    // setTimeout, which the mocked clock would hold back. The readiness query still runs over the real login.
-    await realDb.query("select 1");
+    // The healthy pool connects inside the readiness check itself, on the mocked clock: its zero-delay
+    // connect timer is released by releasingDueTimers' tick(0), and its idle timer is a mocked one too.
     db = { ...realDb, query: ((text: string, params?: never) => healthy(realDb.query(text, params))) as Db["query"] };
     store = realStore;
   } else {
@@ -197,8 +197,15 @@ async function readyzAtTheDeadline(t: TestContext, w: Wiring, hanging: "database
     assert.equal(served.writableEnded, false, "readiness answered before the deadline passed, with one dependency still hanging");
     t.mock.timers.tick(TIMEOUT_MS);
   });
+  // Every timer the case started runs on the mocked clock: a real one (e.g. a pool's idle timer armed
+  // before the clock was mocked) cannot be cancelled by the mocked clearTimeout and would keep the
+  // test process alive for its whole delay after the last assertion.
+  assert.equal(refedRealTimers(), realTimersBefore, `the timed-out ${hanging} case left a real timer running`);
   return { r, base };
 }
+
+/** Real timers that keep the process alive (mocked timers are not real resources and are not counted). */
+const refedRealTimers = (): number => process.getActiveResourcesInfo().filter((r) => r === "Timeout").length;
 
 /** Await `step` until it settles or a step's harness deadline aborts, whichever comes first. */
 type Wait = <S>(step: Promise<S>, what: string) => Promise<S>;
@@ -604,4 +611,20 @@ test("reports timeout when the readiness deadline passes before the probe settle
   const r = await p.result;
   assert.equal(r.status, 503);
   assert.deepEqual(r.body, { status: "not_ready", checks: { database: "timeout", object_store: "timeout" } });
+});
+
+test("reports failed and timeout in one response when one probe rejects before the deadline and the other is still pending", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const dbProbe = deferred<unknown[]>();
+  const storeProbe = deferred<void>();
+  const p = probe(() => dbProbe.promise, () => storeProbe.promise);
+  dbProbe.reject(new Error("ECONNRESET")); // the database rejects first, on the mocked clock's time 0
+  await flush();
+  assert.equal(p.settled(), false, "readiness answered while the object-store probe was still pending before the deadline");
+  t.mock.timers.tick(TIMEOUT_MS); // only now does the deadline pass, with the object-store probe still pending
+  await flush();
+  assert.equal(p.settled(), true, "readiness had not answered once the deadline passed");
+  const r = await p.result;
+  assert.equal(r.status, 503);
+  assert.deepEqual(r.body, { status: "not_ready", checks: { database: "failed", object_store: "timeout" } });
 });
